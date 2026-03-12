@@ -1,6 +1,7 @@
 <script lang="ts">
   import { wallColors, type WallColor } from '$lib/utils/materials';
   import { updateWall } from '$lib/stores/project';
+  import { base } from '$app/paths';
   import type { Wall } from '$lib/models/types';
 
   interface Props {
@@ -32,12 +33,12 @@
   ];
 
   const textureThumbs: Record<string, string> = {
-    'red-brick': '/textures/brick.jpg',
-    'exposed-brick': '/textures/exposed-brick.jpg',
-    'stone': '/textures/stone.jpg',
-    'wood-panel': '/textures/wood-panel.jpg',
-    'concrete-block': '/textures/concrete.jpg',
-    'subway-tile': '/textures/subway-tile.jpg',
+    'red-brick': `${base}/textures/brick.jpg`,
+    'exposed-brick': `${base}/textures/exposed-brick.jpg`,
+    'stone': `${base}/textures/stone.jpg`,
+    'wood-panel': `${base}/textures/wood-panel.jpg`,
+    'concrete-block': `${base}/textures/concrete.jpg`,
+    'subway-tile': `${base}/textures/subway-tile.jpg`,
   };
 
   const plainColors = wallColors.filter(wc => !wc.texture);

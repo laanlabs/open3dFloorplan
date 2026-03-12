@@ -5,6 +5,7 @@
  */
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { base } from '$app/paths';
 
 const SIZE = 128;
 const cache = new Map<string, string>();
@@ -41,7 +42,7 @@ const loader = new GLTFLoader();
 function loadModel(file: string): Promise<THREE.Group> {
   return new Promise((resolve, reject) => {
     loader.load(
-      `/models/${file}.glb`,
+      `${base}/models/${file}.glb`,
       (gltf) => resolve(gltf.scene),
       undefined,
       reject
