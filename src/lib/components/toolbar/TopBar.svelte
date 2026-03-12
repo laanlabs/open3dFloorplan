@@ -1,444 +1,498 @@
 <script lang="ts">
-  import { selectedTool, viewMode, currentProject, saveProject, undo, redo, canUndo, canRedo, gridEnabled, snapEnabled, showDimensions, measurementUnit, currentFloorIndex, addFloor, duplicateFloor, deleteFloor } from '$lib/stores/project';
+  import { onMount } from 'svelte';
   import { base } from '$app/paths';
-  import { exportAsPNG, exportAsJSON, exportAsSVG, exportPDF } from '$lib/utils/export';
-  import { exportDXF } from '$lib/utils/cadExport';
+  import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject } from '$lib/stores/project';
+  import { localStore } from '$lib/services/datastore';
   import { get } from 'svelte/store';
-  import ExportModal from '../ExportModal.svelte';
-  import ImportModal from '../ImportModal.svelte';
-  import SettingsModal from '../SettingsModal.svelte';
-  import HelpModal from '../HelpModal.svelte';
-  import CommandPalette from '../editor/CommandPalette.svelte';
+  import type { Floor, Project } from '$lib/models/types';
+  import { exportAsPNG, exportAsJSON, exportAsSVG, exportPDF } from '$lib/utils/export';
+  import { exportDXF, exportDWG } from '$lib/utils/cadExport';
+  import { importRoomPlan } from '$lib/utils/roomplanImport';
+  import SettingsDialog from './SettingsDialog.svelte';
+  import AreaSummaryPanel from '$lib/components/sidebar/AreaSummaryPanel.svelte';
+  import { saveState, lastSavedAt, manualSave, initAutoSave } from '$lib/stores/saveStatus';
+  import { initVersionHistory, snapshotOnAction } from '$lib/stores/versionHistory';
+  import VersionHistoryPanel from './VersionHistoryPanel.svelte';
 
-  interface Props {
-    canvas?: HTMLCanvasElement | null;
-    onSaveStateCallback?: () => void;
-    onZoomIn?: () => void;
-    onZoomOut?: () => void;
-    onZoomReset?: () => void;
-    onZoomFit?: () => void;
-    currentZoom?: number;
+  let settingsOpen = $state(false);
+  let areaOpen = $state(false);
+  let versionHistoryOpen = $state(false);
+
+  let projectName = $state('');
+  let mode = $state<'2d' | '3d'>('2d');
+  let floors: Floor[] = $state([]);
+  let activeFloorId = $state('');
+  let editingName = $state(false);
+  let exportOpen = $state(false);
+  import { triggerTip } from '$lib/stores/onboarding.svelte';
+  let snapOn = $state(true);
+  let exportRef: HTMLDivElement;
+
+  currentProject.subscribe((p) => {
+    if (p) {
+      projectName = p.name;
+      floors = p.floors;
+      activeFloorId = p.activeFloorId;
+    }
+  });
+  viewMode.subscribe((m) => { mode = m; });
+
+  function setMode(m: '2d' | '3d') {
+    viewMode.set(m);
   }
 
-  let {
-    canvas = null,
-    onSaveStateCallback,
-    onZoomIn,
-    onZoomOut,
-    onZoomReset,
-    onZoomFit,
-    currentZoom = 1
-  }: Props = $props();
-
-  let showExport = $state(false);
-  let showImport = $state(false);
-  let showSettings = $state(false);
-  let showHelp = $state(false);
-  let showCommandPalette = $state(false);
-  let showFileMenu = $state(false);
-  let showEditMenu = $state(false);
-  let showViewMenu = $state(false);
-  let showFloorMenu = $state(false);
-
-  // Subscribe to project for floor info
-  let project = $derived($currentProject);
-  let floorIndex = $derived($currentFloorIndex);
-  let floors = $derived(project?.floors ?? []);
-  let currentFloor = $derived(floors[floorIndex]);
-
-  // Listen for settings event
-  if (typeof window !== 'undefined') {
-    window.addEventListener('open-settings', () => {
-      showSettings = true;
-    });
+  function onNameBlur() {
+    editingName = false;
+    updateProjectName(projectName);
   }
 
-  // Keyboard shortcuts
-  function handleKeydown(e: KeyboardEvent) {
-    // Ignore if in input
-    if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
-
-    // Cmd/Ctrl + K: Command Palette
-    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-      e.preventDefault();
-      showCommandPalette = true;
-      return;
-    }
-
-    // Cmd/Ctrl + S: Save
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-      e.preventDefault();
-      saveProject();
-      return;
-    }
-
-    // Cmd/Ctrl + Z: Undo
-    if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
-      e.preventDefault();
-      undo();
-      return;
-    }
-
-    // Cmd/Ctrl + Shift + Z: Redo
-    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'z') {
-      e.preventDefault();
-      redo();
-      return;
-    }
-
-    // Cmd/Ctrl + E: Export
-    if ((e.metaKey || e.ctrlKey) && e.key === 'e') {
-      e.preventDefault();
-      showExport = true;
-      return;
-    }
-
-    // Cmd/Ctrl + O: Import
-    if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
-      e.preventDefault();
-      showImport = true;
-      return;
-    }
-
-    // ?: Help
-    if (e.key === '?' && !e.metaKey && !e.ctrlKey) {
-      e.preventDefault();
-      showHelp = true;
-      return;
-    }
-
-    // Tool shortcuts
-    switch (e.key.toLowerCase()) {
-      case 'v':
-      case 'escape':
-        selectedTool.set('select');
-        break;
-      case 'w':
-        selectedTool.set('wall');
-        break;
-      case 'd':
-        selectedTool.set('door');
-        break;
-      case 'i':
-        selectedTool.set('window');
-        break;
-      case 'f':
-        selectedTool.set('furniture');
-        break;
-      case 't':
-        selectedTool.set('text');
-        break;
-      case 'm':
-        selectedTool.set('measure');
-        break;
-      case 'g':
-        gridEnabled.update(v => !v);
-        break;
-      case 's':
-        if (!e.metaKey && !e.ctrlKey) snapEnabled.update(v => !v);
-        break;
-    }
+  function onNameKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
   }
 
-  function closeAllMenus() {
-    showFileMenu = false;
-    showEditMenu = false;
-    showViewMenu = false;
-    showFloorMenu = false;
+  function onAddFloor() {
+    addFloor(`Floor ${floors.length}`);
   }
 
-  function handleExport(format: string) {
+  function onRemoveFloor(id: string) {
+    if (floors.length <= 1) return;
+    removeFloor(id);
+  }
+
+  async function save() {
+    await manualSave();
+  }
+
+  // Relative time for tooltip
+  let lastSavedText = $state('');
+  let lastSavedTime: Date | null = $state(null);
+  lastSavedAt.subscribe(v => { lastSavedTime = v; updateLastSavedText(); });
+
+  function updateLastSavedText() {
+    if (!lastSavedTime) { lastSavedText = ''; return; }
+    const diff = Math.floor((Date.now() - lastSavedTime.getTime()) / 1000);
+    if (diff < 5) lastSavedText = 'Last saved: just now';
+    else if (diff < 60) lastSavedText = `Last saved: ${diff}s ago`;
+    else if (diff < 3600) lastSavedText = `Last saved: ${Math.floor(diff / 60)} min ago`;
+    else lastSavedText = `Last saved: ${Math.floor(diff / 3600)}h ago`;
+  }
+
+  function onExport2DPNG() {
+    const p = get(currentProject);
+    const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+    if (canvas) exportAsPNG(canvas, p ?? undefined);
+    exportOpen = false;
+  }
+
+  function onExport3DPNG() {
+    const p = get(currentProject);
+    const name = p?.name || 'floorplan';
+    // Switch to 3D, wait a tick, then screenshot
+    const oldMode = mode;
+    viewMode.set('3d');
+    setTimeout(() => {
+      const c = document.querySelector('.w-full.h-full canvas, div canvas') as HTMLCanvasElement;
+      if (c) {
+        c.toBlob((blob) => {
+          if (blob) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = `${name}-3d.png`; a.click();
+            URL.revokeObjectURL(url);
+          }
+        });
+      }
+      if (oldMode === '2d') viewMode.set('2d');
+    }, 500);
+    exportOpen = false;
+  }
+
+  function onExportJSON() {
+    const p = get(currentProject);
+    if (p) exportAsJSON(p);
+    exportOpen = false;
+  }
+
+  function onExportSVG() {
+    const p = get(currentProject);
+    if (p) exportAsSVG(p);
+    exportOpen = false;
+  }
+
+  function onExportDXF() {
+    const p = get(currentProject);
+    if (p) exportDXF(p);
+    exportOpen = false;
+  }
+
+  function onExportDWG() {
+    const p = get(currentProject);
+    if (p) exportDWG(p);
+    exportOpen = false;
+  }
+
+  function onExportPDF() {
+    const p = get(currentProject);
+    if (p) exportPDF(p);
+    exportOpen = false;
+  }
+
+  function onShareProject() {
     const p = get(currentProject);
     if (!p) return;
-    switch (format) {
-      case 'png':
-        if (canvas) exportAsPNG(canvas, p);
-        break;
-      case 'svg':
-        exportAsSVG(p);
-        break;
-      case 'dxf':
-        exportDXF(p);
-        break;
-      case 'pdf':
-        exportPDF(p);
-        break;
-      case 'json':
-        exportAsJSON(p);
-        break;
-    }
-    showExport = false;
+    const json = JSON.stringify(p, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${p.name || 'floorplan'}.openplan.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
-  // Tool definitions for the toolbar
-  const tools = [
-    { id: 'select', icon: 'cursor', label: 'Select', shortcut: 'V' },
-    { id: 'wall', icon: 'wall', label: 'Wall', shortcut: 'W' },
-    { id: 'door', icon: 'door', label: 'Door', shortcut: 'D' },
-    { id: 'window', icon: 'window', label: 'Window', shortcut: 'I' },
-    { id: 'furniture', icon: 'furniture', label: 'Furniture', shortcut: 'F' },
-    { id: 'text', icon: 'text', label: 'Text', shortcut: 'T' },
-    { id: 'measure', icon: 'measure', label: 'Measure', shortcut: 'M' },
-  ] as const;
+  function newProject() {
+    if (!confirm('Create a new project? Unsaved changes will be lost.')) return;
+    currentProject.set(createDefaultProject());
+    exportOpen = false;
+  }
 
-  function getToolIcon(icon: string) {
-    switch (icon) {
-      case 'cursor':
-        return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/></svg>';
-      case 'wall':
-        return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="21"/></svg>';
-      case 'door':
-        return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2z"/><circle cx="15" cy="12" r="1"/></svg>';
-      case 'window':
-        return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/><line x1="3" y1="12" x2="21" y2="12"/></svg>';
-      case 'furniture':
-        return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 10V7a2 2 0 00-2-2H6a2 2 0 00-2 2v3"/><path d="M4 10h16a2 2 0 012 2v5a2 2 0 01-2 2H4a2 2 0 01-2-2v-5a2 2 0 012-2z"/><path d="M6 19v2M18 19v2"/></svg>';
-      case 'text':
-        return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>';
-      case 'measure':
-        return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.3 8.7l-8.6-8.6a1 1 0 00-1.4 0l-8.6 8.6a1 1 0 000 1.4l8.6 8.6a1 1 0 001.4 0l8.6-8.6a1 1 0 000-1.4z"/><path d="M7.5 11.5l1-1M10.5 8.5l1-1M13.5 11.5l1-1M16.5 8.5l1-1"/></svg>';
-      default:
-        return '';
+  onMount(() => {
+    initAutoSave();
+    initVersionHistory();
+
+    // Update relative timestamp every 15s
+    const interval = setInterval(updateLastSavedText, 15000);
+
+    function handleClickOutside(e: MouseEvent) {
+      if (exportOpen && exportRef && !exportRef.contains(e.target as Node)) {
+        exportOpen = false;
+      }
     }
+    function handleKeydown(e: KeyboardEvent) {
+      if (exportOpen) exportOpen = false;
+      if (e.key === 'Escape' && versionHistoryOpen) versionHistoryOpen = false;
+      if (e.key === 'Escape' && areaOpen) areaOpen = false;
+    }
+    document.addEventListener('click', handleClickOutside, true);
+    document.addEventListener('keydown', handleKeydown, true);
+    return () => {
+      document.removeEventListener('click', handleClickOutside, true);
+      document.removeEventListener('keydown', handleKeydown, true);
+      clearInterval(interval);
+    };
+  });
+
+  function onImportJSON() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,.zip';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        // Detect RoomPlan format (has walls array with dimensions, or rooms/doors/windows at top level)
+        if (data.walls && Array.isArray(data.walls) && data.walls[0]?.dimensions) {
+          // RoomPlan JSON — import into current project
+          const floor = importRoomPlan(data, { straighten: true, orthogonal: true });
+          importFloorIntoCurrentProject(floor);
+        } else if (data.floors && data.id) {
+          // Validate project structure
+          if (!Array.isArray(data.floors) || data.floors.length === 0) {
+            alert('Invalid project file: "floors" must be a non-empty array.');
+            return;
+          }
+          for (const fl of data.floors) {
+            if (!fl.id || !Array.isArray(fl.walls)) {
+              alert('Invalid project file: each floor must have an "id" and "walls" array.');
+              return;
+            }
+          }
+          if (!data.activeFloorId || !data.floors.some((f: any) => f.id === data.activeFloorId)) {
+            data.activeFloorId = data.floors[0].id;
+          }
+          // Revive dates
+          if (data.createdAt) data.createdAt = new Date(data.createdAt);
+          if (data.updatedAt) data.updatedAt = new Date(data.updatedAt);
+          loadProject(data as Project);
+        } else {
+          alert('Unrecognized file format. Expected a project file or Apple RoomPlan JSON.');
+        }
+      } catch (e: any) {
+        alert('Failed to import: ' + e.message);
+      }
+    };
+    input.click();
+    exportOpen = false;
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} onclick={closeAllMenus} />
-
-<!-- Top Bar -->
-<div class="h-12 bg-gradient-to-r from-slate-800 to-slate-700 flex items-center px-2 gap-1 border-b border-slate-600/50 select-none">
-  <!-- Logo / Back -->
-  <a href={base || '/'} class="flex items-center gap-1 text-white/70 hover:text-white text-sm transition-colors"
-    title="Back to Projects">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+<div class="h-12 bg-gradient-to-r from-slate-800 to-slate-700 flex items-center px-4 gap-3 shrink-0 shadow-sm">
+  <!-- Back to Projects -->
+  <a
+    href={base || '/'}
+    class="flex items-center gap-1 text-white/70 hover:text-white text-sm transition-colors"
+    title="Back to Projects"
+  >
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    <span class="hidden sm:inline">Projects</span>
   </a>
 
-  <div class="w-px h-6 bg-slate-600 mx-1"></div>
+  <div class="h-5 w-px bg-white/20"></div>
 
-  <!-- File Menu -->
-  <div class="relative">
+  {#if editingName}
+    <input
+      type="text"
+      bind:value={projectName}
+      onblur={onNameBlur}
+      onkeydown={onNameKeydown}
+      class="bg-white/20 text-white font-semibold px-2 py-0.5 rounded border border-white/30 outline-none text-sm w-40"
+    />
+  {:else}
     <button
-      onclick={(e) => { e.stopPropagation(); closeAllMenus(); showFileMenu = !showFileMenu; }}
-      class="px-3 py-1.5 text-sm text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
-    >
-      File
-    </button>
-    {#if showFileMenu}
-      <div class="absolute top-full left-0 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl py-1 min-w-[180px] z-50">
-        <button onclick={() => { saveProject(); closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between">
-          <span>Save</span>
-          <span class="text-xs text-white/40">⌘S</span>
-        </button>
-        <button onclick={() => { showExport = true; closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between">
-          <span>Export...</span>
-          <span class="text-xs text-white/40">⌘E</span>
-        </button>
-        <button onclick={() => { showImport = true; closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between">
-          <span>Import...</span>
-          <span class="text-xs text-white/40">⌘O</span>
-        </button>
-        <div class="h-px bg-slate-600 my-1"></div>
-        <button onclick={() => { showSettings = true; closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left">
-          Settings
-        </button>
-      </div>
-    {/if}
-  </div>
+      class="font-semibold text-white text-sm hover:bg-white/10 px-2 py-0.5 rounded transition-colors"
+      onclick={() => editingName = true}
+      title="Click to rename"
+    >{projectName}</button>
+  {/if}
 
-  <!-- Edit Menu -->
-  <div class="relative">
+  <div class="h-5 w-px bg-white/20"></div>
+
+  <!-- Floor selector as buttons -->
+  <div class="flex items-center gap-1">
+    {#each floors as fl}
+      <button
+        class="px-2 py-0.5 text-xs rounded transition-colors {fl.id === activeFloorId ? 'bg-white text-slate-800 font-semibold' : 'text-white/80 hover:bg-white/10'}"
+        onclick={() => setActiveFloor(fl.id)}
+        ondblclick={() => onRemoveFloor(fl.id)}
+        title={fl.id === activeFloorId ? 'Active floor (dbl-click to remove)' : 'Click to switch, dbl-click to remove'}
+      >{fl.name}</button>
+    {/each}
     <button
-      onclick={(e) => { e.stopPropagation(); closeAllMenus(); showEditMenu = !showEditMenu; }}
-      class="px-3 py-1.5 text-sm text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
-    >
-      Edit
-    </button>
-    {#if showEditMenu}
-      <div class="absolute top-full left-0 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl py-1 min-w-[180px] z-50">
-        <button onclick={() => { undo(); closeAllMenus(); }} disabled={!$canUndo} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between disabled:opacity-40 disabled:cursor-not-allowed">
-          <span>Undo</span>
-          <span class="text-xs text-white/40">⌘Z</span>
-        </button>
-        <button onclick={() => { redo(); closeAllMenus(); }} disabled={!$canRedo} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between disabled:opacity-40 disabled:cursor-not-allowed">
-          <span>Redo</span>
-          <span class="text-xs text-white/40">⇧⌘Z</span>
-        </button>
-      </div>
-    {/if}
+      onclick={onAddFloor}
+      class="text-white/80 hover:text-white text-xs hover:bg-white/10 px-1.5 py-0.5 rounded transition-colors"
+      title="Add Floor"
+      aria-label="Add Floor"
+    >+</button>
+    <span class="text-white/40 text-[10px] ml-1">{floors.length}F</span>
   </div>
-
-  <!-- View Menu -->
-  <div class="relative">
-    <button
-      onclick={(e) => { e.stopPropagation(); closeAllMenus(); showViewMenu = !showViewMenu; }}
-      class="px-3 py-1.5 text-sm text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
-    >
-      View
-    </button>
-    {#if showViewMenu}
-      <div class="absolute top-full left-0 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl py-1 min-w-[180px] z-50">
-        <button onclick={() => { gridEnabled.update(v => !v); closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between">
-          <span>{$gridEnabled ? '✓ ' : ''}Grid</span>
-          <span class="text-xs text-white/40">G</span>
-        </button>
-        <button onclick={() => { snapEnabled.update(v => !v); closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between">
-          <span>{$snapEnabled ? '✓ ' : ''}Snap</span>
-          <span class="text-xs text-white/40">S</span>
-        </button>
-        <button onclick={() => { showDimensions.update(v => !v); closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left">
-          <span>{$showDimensions ? '✓ ' : ''}Dimensions</span>
-        </button>
-        <div class="h-px bg-slate-600 my-1"></div>
-        <button onclick={() => { if (onZoomIn) onZoomIn(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between">
-          <span>Zoom In</span>
-          <span class="text-xs text-white/40">+</span>
-        </button>
-        <button onclick={() => { if (onZoomOut) onZoomOut(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between">
-          <span>Zoom Out</span>
-          <span class="text-xs text-white/40">-</span>
-        </button>
-        <button onclick={() => { if (onZoomReset) onZoomReset(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center justify-between">
-          <span>Reset Zoom</span>
-          <span class="text-xs text-white/40">0</span>
-        </button>
-        <button onclick={() => { if (onZoomFit) onZoomFit(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left">
-          <span>Fit to Screen</span>
-        </button>
-      </div>
-    {/if}
-  </div>
-
-  <!-- Floor Menu -->
-  <div class="relative">
-    <button
-      onclick={(e) => { e.stopPropagation(); closeAllMenus(); showFloorMenu = !showFloorMenu; }}
-      class="px-3 py-1.5 text-sm text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
-    >
-      Floor: {currentFloor?.name || 'Ground'}
-    </button>
-    {#if showFloorMenu}
-      <div class="absolute top-full left-0 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl py-1 min-w-[180px] z-50">
-        {#each floors as floor, i}
-          <button
-            onclick={() => { currentFloorIndex.set(i); closeAllMenus(); }}
-            class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left flex items-center gap-2"
-          >
-            {#if i === floorIndex}
-              <span class="text-blue-400">●</span>
-            {:else}
-              <span class="text-transparent">●</span>
-            {/if}
-            {floor.name}
-          </button>
-        {/each}
-        <div class="h-px bg-slate-600 my-1"></div>
-        <button onclick={() => { addFloor(); closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left">
-          + Add Floor
-        </button>
-        <button onclick={() => { duplicateFloor(); closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-white/80 hover:text-white hover:bg-white/10 text-left">
-          Duplicate Floor
-        </button>
-        {#if floors.length > 1}
-          <button onclick={() => { deleteFloor(); closeAllMenus(); }} class="w-full px-3 py-2 text-sm text-red-400 hover:text-red-300 hover:bg-white/10 text-left">
-            Delete Floor
-          </button>
-        {/if}
-      </div>
-    {/if}
-  </div>
-
-  <!-- Help -->
-  <button
-    onclick={() => showHelp = true}
-    class="px-3 py-1.5 text-sm text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
-  >
-    Help
-  </button>
 
   <div class="flex-1"></div>
 
-  <!-- Tool Bar -->
-  <div class="flex items-center gap-0.5 bg-slate-900/50 rounded-lg p-0.5">
-    {#each tools as tool}
-      <button
-        onclick={() => selectedTool.set(tool.id)}
-        class="w-8 h-8 flex items-center justify-center rounded transition-all"
-        class:bg-blue-500={$selectedTool === tool.id}
-        class:text-white={$selectedTool === tool.id}
-        class:text-white/60={$selectedTool !== tool.id}
-        class:hover:text-white={$selectedTool !== tool.id}
-        class:hover:bg-white/10={$selectedTool !== tool.id}
-        title="{tool.label} ({tool.shortcut})"
-      >
-        {@html getToolIcon(tool.icon)}
-      </button>
-    {/each}
-  </div>
+  <button onclick={undo} class="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors" title="Undo (Ctrl+Z)" aria-label="Undo">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+  </button>
+  <button onclick={redo} class="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors" title="Redo (Ctrl+Y)" aria-label="Redo">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/></svg>
+  </button>
 
-  <div class="w-px h-6 bg-slate-600 mx-2"></div>
+  <div class="h-5 w-px bg-white/20"></div>
 
-  <!-- View Mode Toggle -->
-  <div class="flex items-center gap-0.5 bg-slate-900/50 rounded-lg p-0.5">
-    <button
-      onclick={() => viewMode.set('2d')}
-      class="px-3 py-1.5 text-sm rounded transition-all"
-      class:bg-blue-500={$viewMode === '2d'}
-      class:text-white={$viewMode === '2d'}
-      class:text-white/60={$viewMode !== '2d'}
-      class:hover:text-white={$viewMode !== '2d'}
-    >
-      2D
-    </button>
-    <button
-      onclick={() => viewMode.set('3d')}
-      class="px-3 py-1.5 text-sm rounded transition-all"
-      class:bg-blue-500={$viewMode === '3d'}
-      class:text-white={$viewMode === '3d'}
-      class:text-white/60={$viewMode !== '3d'}
-      class:hover:text-white={$viewMode !== '3d'}
-    >
-      3D
-    </button>
-  </div>
-
-  <div class="w-px h-6 bg-slate-600 mx-2"></div>
-
-  <!-- Zoom -->
-  <div class="flex items-center gap-1">
-    <button
-      onclick={() => { if (onZoomOut) onZoomOut(); }}
-      class="w-7 h-7 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 rounded transition-colors"
-      title="Zoom Out"
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
-    </button>
-    <span class="text-xs text-white/60 w-12 text-center">{Math.round(currentZoom * 100)}%</span>
-    <button
-      onclick={() => { if (onZoomIn) onZoomIn(); }}
-      class="w-7 h-7 flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 rounded transition-colors"
-      title="Zoom In"
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-    </button>
-  </div>
-
-  <div class="w-px h-6 bg-slate-600 mx-2"></div>
-
-  <!-- Command Palette Button -->
+  <!-- Snap to grid toggle -->
   <button
-    onclick={() => showCommandPalette = true}
-    class="flex items-center gap-2 px-3 py-1.5 text-sm text-white/60 hover:text-white bg-slate-900/50 hover:bg-slate-900 rounded-lg transition-colors"
-    title="Command Palette (⌘K)"
+    onclick={() => { snapEnabled.update(v => !v); snapOn = !snapOn; }}
+    class="p-1.5 rounded transition-colors {snapOn ? 'text-white bg-white/20' : 'text-white/40 hover:text-white/70 hover:bg-white/10'}"
+    title="Snap to Grid ({snapOn ? 'On' : 'Off'})"
+    aria-label="Snap to Grid"
   >
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-    <span class="hidden sm:inline">Search</span>
-    <kbd class="hidden sm:inline text-[10px] px-1.5 py-0.5 bg-slate-700 rounded border border-slate-600 text-white/40">⌘K</kbd>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+    </svg>
+  </button>
+
+  <!-- Select / Pan toggle -->
+  {#if mode === '2d'}
+  <div class="flex bg-white/15 rounded-full p-0.5">
+    <button
+      onclick={() => panMode.set(false)}
+      class="px-2 py-1 text-xs font-semibold rounded-full transition-colors {!$panMode ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+      title="Select mode (V)"
+      aria-label="Select mode"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/></svg>
+    </button>
+    <button
+      onclick={() => panMode.set(true)}
+      class="px-2 py-1 text-xs font-semibold rounded-full transition-colors {$panMode ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+      title="Pan mode (H)"
+      aria-label="Pan mode"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-4 0v1"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>
+    </button>
+  </div>
+  {/if}
+
+  <!-- Furniture visibility toggle -->
+  <button
+    onclick={() => layerVisibility.update(v => ({ ...v, furniture: !v.furniture }))}
+    class="p-1.5 rounded transition-colors {$showFurnitureStore ? 'text-white bg-white/20' : 'text-white/40 hover:text-white/70 hover:bg-white/10'}"
+    title="Toggle Furniture ({$showFurnitureStore ? 'Visible' : 'Hidden'})"
+    aria-label="Toggle Furniture"
+  >
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="12" width="20" height="8" rx="1"/><path d="M4 12V7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v5"/><line x1="12" y1="12" x2="12" y2="20"/>
+    </svg>
+  </button>
+
+  <div class="h-5 w-px bg-white/20"></div>
+
+  <!-- 2D/3D pill toggle -->
+  <div class="flex bg-white/15 rounded-full p-0.5">
+    <button
+      onclick={() => setMode('2d')}
+      class="px-3 py-1 text-xs font-semibold rounded-full transition-colors {mode === '2d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+    >2D</button>
+    <button
+      onclick={() => setMode('3d')}
+      class="px-3 py-1 text-xs font-semibold rounded-full transition-colors {mode === '3d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+    >3D</button>
+  </div>
+
+  <!-- Zoom controls (2D only) -->
+  {#if mode === '2d'}
+    <div class="flex items-center gap-1 bg-white/15 rounded-full p-0.5">
+      <button
+        onclick={() => canvasZoom.update(z => Math.max(0.1, z / 1.25))}
+        class="w-7 h-7 flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors text-sm font-bold"
+        title="Zoom Out (−)"
+        aria-label="Zoom Out"
+      >−</button>
+      <button
+        onclick={() => canvasZoom.set(1)}
+        class="px-2 py-1 text-xs font-medium text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors min-w-[3rem] text-center"
+        title="Reset Zoom (100%)"
+      >{Math.round($canvasZoom * 100)}%</button>
+      <button
+        onclick={() => canvasZoom.update(z => Math.min(10, z * 1.25))}
+        class="w-7 h-7 flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors text-sm font-bold"
+        title="Zoom In (+)"
+        aria-label="Zoom In"
+      >+</button>
+    </div>
+  {/if}
+
+  <!-- Version History button -->
+  <button
+    onclick={() => versionHistoryOpen = true}
+    class="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
+    title="Version History"
+    aria-label="Version History"
+  >
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+  </button>
+
+  <!-- Area summary button -->
+  <button
+    onclick={() => areaOpen = true}
+    class="px-2 py-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
+    title="Area Summary"
+    aria-label="Area Summary"
+  >
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 3v18"/></svg>
+  </button>
+
+  <!-- Settings button -->
+  <button
+    onclick={() => settingsOpen = true}
+    class="px-2 py-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
+    title="Settings"
+    aria-label="Settings"
+  >
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </button>
+
+  <div class="h-5 w-px bg-white/20"></div>
+
+  <!-- Export dropdown -->
+  <div class="relative" bind:this={exportRef}>
+    <button
+      onclick={() => { exportOpen = !exportOpen; if (exportOpen) triggerTip('first-export', 300, 60); }}
+      class="px-3 py-1.5 text-sm text-white/90 hover:text-white hover:bg-white/10 rounded transition-colors flex items-center gap-1.5"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Export
+    </button>
+    {#if exportOpen}
+      <div class="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 w-48 z-50">
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={() => { exportOpen = false; window.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true })); }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+          Print Layout
+        </button>
+        <div class="h-px bg-gray-100 my-1"></div>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={onExport2DPNG}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+          Export 2D as PNG
+        </button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={onExport3DPNG}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          Export 3D as PNG
+        </button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={onExportSVG}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+          Export as SVG
+        </button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={onExportDXF}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 16h2"/><path d="M14 16h2"/></svg>
+          Export as DXF
+        </button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={onExportDWG}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 16h6"/></svg>
+          Export as DWG
+        </button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={onExportPDF}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 11v6"/><path d="M8 11v6"/><path d="M12 11v6"/></svg>
+          Export as PDF
+        </button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={onExportJSON}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          Download JSON
+        </button>
+        <div class="h-px bg-gray-100 my-1"></div>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={onImportJSON}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Import JSON
+        </button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" onclick={newProject}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New Project
+        </button>
+      </div>
+    {/if}
+  </div>
+
+  <span
+    class="text-[11px] font-medium transition-all duration-300 {$saveState === 'saved' ? 'text-emerald-400' : $saveState === 'saving' ? 'text-amber-300 animate-pulse' : 'text-white/50'}"
+    title={lastSavedText || 'Not saved yet'}
+  >
+    {#if $saveState === 'saving'}
+      Saving…
+    {:else if $saveState === 'saved'}
+      Saved ✓
+    {:else}
+      Unsaved •
+    {/if}
+  </span>
+  <button onclick={save} class="px-3 py-1.5 text-sm bg-white text-slate-800 font-semibold rounded-lg hover:bg-blue-50 transition-colors shadow-sm">
+    Save
   </button>
 </div>
 
-<!-- Modals -->
-<ExportModal bind:open={showExport} onExport={handleExport} />
-<ImportModal bind:open={showImport} {onSaveStateCallback} />
-<SettingsModal bind:open={showSettings} />
-<HelpModal bind:open={showHelp} />
-<CommandPalette bind:open={showCommandPalette} />
+<SettingsDialog bind:open={settingsOpen} />
+<VersionHistoryPanel bind:open={versionHistoryOpen} />
+
+{#if areaOpen}
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onclick={() => areaOpen = false} onkeydown={(e) => { if (e.key === 'Escape') areaOpen = false; }}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="bg-white rounded-xl shadow-2xl w-[420px] max-h-[80vh] overflow-hidden" onclick={(e) => e.stopPropagation()}>
+    <div class="flex items-center justify-between px-5 py-3 border-b border-gray-200">
+      <h2 class="text-base font-semibold text-gray-800">📐 Area Summary</h2>
+      <button onclick={() => areaOpen = false} class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <div class="overflow-y-auto max-h-[calc(80vh-52px)] p-1">
+      <AreaSummaryPanel />
+    </div>
+  </div>
+</div>
+{/if}
