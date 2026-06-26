@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { currentProject, viewMode, selectedElementId, selectedRoomId, createDefaultProject } from '$lib/stores/project';
+  import CollabPanel from '$lib/components/collaboration/CollabPanel.svelte';
   import { localStore } from '$lib/services/datastore';
   import TopBar from '$lib/components/toolbar/TopBar.svelte';
   import BuildPanel from '$lib/components/sidebar/BuildPanel.svelte';
@@ -19,15 +20,15 @@
   let commandPaletteOpen = $state(false);
   let printOpen = $state(false);
 
-  // Lazy-load ThreeViewer to avoid loading Three.js (~1.4MB) until 3D mode is activated
+  // Lazy-load ThreeViewer for both Design and Collaboration modes
   let ThreeViewer: any = $state(null);
   $effect(() => {
-    if (mode === '3d' && !ThreeViewer) {
+    if ((mode === '3d' || mode === 'collab') && !ThreeViewer) {
       import('$lib/components/viewer3d/ThreeViewer.svelte').then(m => { ThreeViewer = m.default; });
     }
   });
 
-  let mode = $state<'2d' | '3d'>('3d');
+  let mode = $state<'2d' | '3d' | 'collab'>('3d');
   let ready = $state(false);
   let showHelp = $state(false);
   let showUndoHistory = $state(false);
@@ -83,7 +84,11 @@
   <div class="h-screen flex flex-col overflow-hidden">
     <TopBar />
     <div class="flex flex-1 overflow-hidden">
-      <BuildPanel />
+      {#if mode === 'collab'}
+        <CollabPanel />
+      {:else}
+        <BuildPanel />
+      {/if}
 
       <div class="flex-1 min-w-0 relative">
         {#if mode === '2d'}
@@ -91,7 +96,7 @@
           <AlignmentToolbar />
         {:else}
           {#if ThreeViewer}
-            <ThreeViewer />
+            <ThreeViewer collaborationMode={mode === 'collab'} />
           {:else}
             <div class="flex items-center justify-center h-full text-slate-400">Loading 3D viewer…</div>
           {/if}
@@ -100,7 +105,9 @@
       {#if showLayers && mode === '2d'}
         <LayersPanel />
       {/if}
-      <PropertiesPanel is3D={mode === '3d'} />
+      {#if mode !== 'collab'}
+        <PropertiesPanel is3D={mode === '3d'} />
+      {/if}
     </div>
   </div>
 

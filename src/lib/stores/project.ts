@@ -39,7 +39,7 @@ export const showFurnitureStore = writable<boolean>(true);
 export const selectedElementId = writable<string | null>(null);
 /** Multi-select: set of element IDs currently selected (used alongside selectedElementId for marquee/shift-click) */
 export const selectedElementIds = writable<Set<string>>(new Set());
-export const viewMode = writable<'2d' | '3d'>('3d');
+export const viewMode = writable<'2d' | '3d' | 'collab'>('3d');
 
 // Undo / Redo
 interface UndoEntry {

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject } from '$lib/stores/project';
+  import { collabUsers, activeUser, activeUserId } from '$lib/stores/collaboration';
+  import ShareModal from '$lib/components/collaboration/ShareModal.svelte';
   import { localStore } from '$lib/services/datastore';
   import { get } from 'svelte/store';
   import type { Floor, Project } from '$lib/models/types';
@@ -18,7 +20,8 @@
   let versionHistoryOpen = $state(false);
 
   let projectName = $state('');
-  let mode = $state<'2d' | '3d'>('2d');
+  let mode = $state<'2d' | '3d' | 'collab'>('3d');
+  let shareOpen = $state(false);
   let floors: Floor[] = $state([]);
   let activeFloorId = $state('');
   let editingName = $state(false);
@@ -40,8 +43,12 @@
   });
   viewMode.subscribe((m) => { mode = m; });
 
-  function setMode(m: '2d' | '3d') {
+  function setMode(m: '2d' | '3d' | 'collab') {
     viewMode.set(m);
+  }
+
+  function initials(name: string) {
+    return name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
   }
 
   function onNameBlur() {
@@ -343,8 +350,8 @@
     </svg>
   </button>
 
-  <!-- Select / Pan toggle (Engineering only; dimmed in Design) -->
-  <div class="flex bg-white/15 rounded-full p-0.5 transition-opacity {mode === '3d' ? 'opacity-30 pointer-events-none' : ''}">
+  <!-- Select / Pan toggle (Engineering only; dimmed in Design/Collab) -->
+  <div class="flex bg-white/15 rounded-full p-0.5 transition-opacity {mode !== '2d' ? 'opacity-30 pointer-events-none' : ''}">
     <button
       onclick={() => panMode.set(false)}
       class="px-2 py-1 text-xs font-semibold rounded-full transition-colors {!$panMode ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
@@ -377,7 +384,7 @@
 
   <div class="h-5 w-px bg-white/20"></div>
 
-  <!-- Mode pill toggle: Design (3D) | Engineering (2D) | Collaboration (disabled) -->
+  <!-- Mode pill toggle: Design (3D) | Engineering (2D) | Collaboration -->
   <div class="flex bg-white/15 rounded-full p-0.5">
     <button
       onclick={() => setMode('3d')}
@@ -388,14 +395,13 @@
       class="px-3 py-1 text-xs font-semibold rounded-full transition-colors {mode === '2d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
     >Engineering</button>
     <button
-      disabled
-      class="px-3 py-1 text-xs font-semibold rounded-full text-white/30 cursor-not-allowed"
-      title="Coming soon"
+      onclick={() => setMode('collab')}
+      class="px-3 py-1 text-xs font-semibold rounded-full transition-colors {mode === 'collab' ? 'bg-violet-500 text-white' : 'text-white/80 hover:text-white'}"
     >Collaboration</button>
   </div>
 
-  <!-- Zoom controls (Engineering only; dimmed in Design) -->
-  <div class="flex items-center gap-1 bg-white/15 rounded-full p-0.5 transition-opacity {mode === '3d' ? 'opacity-30 pointer-events-none' : ''}">
+  <!-- Zoom controls (Engineering only; dimmed in Design/Collab) -->
+  <div class="flex items-center gap-1 bg-white/15 rounded-full p-0.5 transition-opacity {mode !== '2d' ? 'opacity-30 pointer-events-none' : ''}">
     <button
       onclick={() => canvasZoom.update(z => Math.max(0.1, z / 1.25))}
       class="w-7 h-7 flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors text-sm font-bold"
@@ -414,6 +420,25 @@
       aria-label="Zoom In"
     >+</button>
   </div>
+
+  <!-- Share button with user avatar stack -->
+  <button
+    onclick={() => shareOpen = true}
+    class="flex items-center gap-1.5 px-2.5 py-1.5 bg-white/10 hover:bg-white/20 text-white text-xs font-semibold rounded-lg transition-colors border border-white/20 hover:border-white/30"
+    title="Share & Access Control"
+    aria-label="Share"
+  >
+    <!-- Avatar stack (show up to 3 users) -->
+    <div class="flex -space-x-1.5">
+      {#each $collabUsers.slice(0, 3) as user}
+        <div
+          class="w-5 h-5 rounded-full border-2 border-slate-700 flex items-center justify-center text-white text-[8px] font-bold"
+          style="background-color: {user.avatarColor}"
+        >{initials(user.name)}</div>
+      {/each}
+    </div>
+    <span>Share</span>
+  </button>
 
   <!-- Version History button -->
   <button
@@ -523,6 +548,10 @@
 
 <SettingsDialog bind:open={settingsOpen} />
 <VersionHistoryPanel bind:open={versionHistoryOpen} />
+
+{#if shareOpen}
+  <ShareModal onClose={() => shareOpen = false} />
+{/if}
 
 {#if areaOpen}
 <!-- svelte-ignore a11y_no_static_element_interactions -->

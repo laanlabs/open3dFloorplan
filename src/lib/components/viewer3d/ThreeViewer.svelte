@@ -23,6 +23,10 @@
   import { roomPresets } from '$lib/utils/roomPresets';
   import { roomTemplates, placeRoomTemplate } from '$lib/utils/roomTemplates';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
+  import { activeUser, highlightedCommentObjectId, addComment } from '$lib/stores/collaboration';
+
+  // Props
+  const { collaborationMode = false }: { collaborationMode?: boolean } = $props();
   import { getMaterial } from '$lib/utils/materials';
   import { getWallTextureCanvas, getFloorTextureCanvas, setTextureLoadCallback } from '$lib/utils/textureGenerator';
 
@@ -67,6 +71,14 @@
   let selectionBoxHelper: THREE.BoxHelper | null = null;
   // Hovering on a wall (for door/window placement)
   let wallHoverWallId: string | null = null;
+
+  // Collaboration mode state
+  let collabSelectedObjectId: string | null = null;
+  let commentInputText = $state('');
+  let commentInputVisible = $state(false);
+  let canEdit = true; // resolved from activeUser store subscription
+  // Orange outline mesh for collab-highlighted object
+  let collabOutlineHelper: THREE.BoxHelper | null = null;
 
   // 3D Edit mode — enables click-to-select
   let editMode = $state(false);
@@ -747,7 +759,7 @@
       dragPointerDownPos = { x: e.clientX, y: e.clientY };
       draggingFurnitureId = null;
 
-      if (!editMode || furniturePlacementMode || walkthroughMode || cameraPlacementMode) return;
+      if (!editMode || furniturePlacementMode || walkthroughMode || cameraPlacementMode || !canEdit) return;
 
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -795,7 +807,34 @@
         return;
       }
 
-      // Only process clicks in edit mode
+      // ── Collaboration mode click → select object and open comment input ──
+      if (collaborationMode && !wasDrag && !walkthroughMode) {
+        const rect2 = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((e.clientX - rect2.left) / rect2.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect2.top) / rect2.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+
+        // Try furniture first
+        const fMeshes: THREE.Object3D[] = [];
+        wallGroup.traverse(obj => { if ((obj as THREE.Mesh).isMesh && obj.userData.furnitureId) fMeshes.push(obj); });
+        const fHits = raycaster.intersectObjects(fMeshes, false);
+        if (fHits.length > 0) {
+          collabSelectedObjectId = fHits[0].object.userData.furnitureId as string;
+        } else {
+          // Try walls
+          const wHits = raycaster.intersectObjects(wallGroup.children, false);
+          const wHit = wHits.find(h => h.object.userData.wallId);
+          collabSelectedObjectId = wHit ? (wHit.object.userData.wallId as string) : null;
+        }
+
+        setCollabOutline(collabSelectedObjectId);
+        commentInputVisible = collabSelectedObjectId !== null;
+        commentInputText = '';
+        markSceneDirty();
+        return;
+      }
+
+      // Only process clicks in edit mode (non-collab)
       if (!editMode) return;
       if (wasDrag) return;
       if (walkthroughMode) return;
@@ -1276,6 +1315,34 @@
     placingColumn.set(false);
     placingRoomPresetId.set(null);
     updateGridVisibility();
+    markSceneDirty();
+  }
+
+  // ─── Collaboration helpers ─────────────────────────────────────────────────
+
+  function setCollabOutline(objectId: string | null) {
+    if (collabOutlineHelper) { scene.remove(collabOutlineHelper); collabOutlineHelper = null; }
+    if (!objectId) { markSceneDirty(); return; }
+    wallGroup.traverse((obj: any) => {
+      if (!collabOutlineHelper && obj.userData?.furnitureId === objectId && obj.parent === wallGroup) {
+        collabOutlineHelper = new THREE.BoxHelper(obj as THREE.Object3D, new THREE.Color(0xf59e0b));
+        scene.add(collabOutlineHelper);
+      }
+      // Also try wallId
+      if (!collabOutlineHelper && obj.userData?.wallId === objectId && (obj as THREE.Mesh).isMesh) {
+        collabOutlineHelper = new THREE.BoxHelper(obj as THREE.Object3D, new THREE.Color(0xf59e0b));
+        scene.add(collabOutlineHelper);
+      }
+    });
+    markSceneDirty();
+  }
+
+  function submitComment() {
+    const text = commentInputText.trim();
+    if (!text) return;
+    addComment(collabSelectedObjectId, text);
+    commentInputText = '';
+    commentInputVisible = false;
     markSceneDirty();
   }
 
@@ -2197,8 +2264,8 @@
   }
 
   function onKeyDown(event: KeyboardEvent) {
-    // Delete/Backspace — remove selected furniture in edit mode
-    if ((event.code === 'Delete' || event.code === 'Backspace') && editMode && !walkthroughMode && selectedFurnitureId) {
+    // Delete/Backspace — remove selected furniture in edit mode (full access only)
+    if ((event.code === 'Delete' || event.code === 'Backspace') && editMode && !walkthroughMode && selectedFurnitureId && canEdit) {
       removeFurniture(selectedFurnitureId);
       selectedFurnitureId = null;
       selectedElementId.set(null);
@@ -2206,8 +2273,8 @@
       markSceneDirty();
       return;
     }
-    // R — rotate selected furniture by 45°
-    if (event.code === 'KeyR' && editMode && !walkthroughMode && selectedFurnitureId) {
+    // R — rotate selected furniture by 45° (full access only)
+    if (event.code === 'KeyR' && editMode && !walkthroughMode && selectedFurnitureId && canEdit) {
       const floor = get(activeFloor);
       const item = floor?.furniture.find((f: any) => f.id === selectedFurnitureId);
       if (item) {
@@ -2492,6 +2559,16 @@
       }
     });
 
+    // Permission level — controls whether mutations are allowed
+    const unsubActiveUser = activeUser.subscribe(user => {
+      canEdit = user.permissionLevel === 'full';
+    });
+
+    // Collab panel → highlight object in 3D
+    const unsubHighlight = highlightedCommentObjectId.subscribe(id => {
+      if (collaborationMode) setCollabOutline(id);
+    });
+
     // React to placement signals from BuildPanel
     const unsubPlacingFurniture = placingFurnitureId.subscribe((id) => {
       if (id) {
@@ -2577,6 +2654,8 @@
       unsub();
       unsubRooms();
       unsubSel();
+      unsubActiveUser();
+      unsubHighlight();
       unsubPlacingFurniture();
       unsubPlacingStair();
       unsubPlacingColumn();
@@ -2944,7 +3023,98 @@
     </div>
   {/if}
 
-  {#if editMode && !walkthroughMode}
+  <!-- Collaboration mode UI -->
+  {#if collaborationMode}
+    <!-- Click-to-comment hint bar -->
+    {#if !commentInputVisible}
+      <div class="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+        <div class="bg-violet-700/90 text-white text-sm px-4 py-2 rounded-lg backdrop-blur-sm flex items-center gap-2">
+          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+          </svg>
+          Click any object or wall to leave a comment
+        </div>
+      </div>
+    {/if}
+
+    <!-- Comment input panel -->
+    {#if commentInputVisible}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 bg-white rounded-xl shadow-2xl w-80 overflow-hidden border border-gray-200">
+        <!-- Header -->
+        <div class="flex items-center justify-between px-3 py-2.5 bg-violet-600 text-white">
+          <div class="flex items-center gap-1.5 text-xs font-semibold">
+            <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+            New Comment
+            {#if collabSelectedObjectId}
+              <span class="font-normal opacity-80 truncate max-w-[120px]">on {collabSelectedObjectId.slice(0, 8)}…</span>
+            {/if}
+          </div>
+          <div class="flex items-center gap-2">
+            <!-- Email notification (placeholder) -->
+            <button
+              disabled
+              class="text-white/30 cursor-not-allowed"
+              title="Email notification — coming soon"
+            >
+              <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+              </svg>
+            </button>
+            <button
+              onclick={() => { commentInputVisible = false; setCollabOutline(null); collabSelectedObjectId = null; commentInputText = ''; }}
+              class="text-white/70 hover:text-white"
+              aria-label="Close"
+            >
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <!-- Text input -->
+        <div class="p-3">
+          <!-- svelte-ignore a11y_autofocus -->
+          <textarea
+            bind:value={commentInputText}
+            placeholder="Add a comment…"
+            rows="3"
+            autofocus
+            class="w-full resize-none text-sm text-slate-700 border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400 placeholder-slate-300"
+            onkeydown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitComment(); } if (e.key === 'Escape') { commentInputVisible = false; setCollabOutline(null); collabSelectedObjectId = null; commentInputText = ''; } }}
+          ></textarea>
+          <div class="flex items-center justify-between mt-2">
+            <span class="text-[10px] text-slate-400">Ctrl+Enter to submit</span>
+            <button
+              onclick={submitComment}
+              disabled={!commentInputText.trim()}
+              class="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-colors"
+            >Post Comment</button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Viewer-only banner (if user has limited permissions) -->
+    {#if !canEdit}
+      <div class="absolute top-16 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+        <div class="bg-amber-500/90 text-white text-xs px-3 py-1.5 rounded-full backdrop-blur-sm font-medium flex items-center gap-1.5">
+          <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+          </svg>
+          Viewer & Comment Only — editing disabled
+        </div>
+      </div>
+    {/if}
+  {/if}
+
+  {#if editMode && !walkthroughMode && !collaborationMode}
     <div class="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-10">
       <div class="bg-blue-600/90 text-white text-sm px-4 py-2 rounded-lg backdrop-blur-sm flex items-center gap-2">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
