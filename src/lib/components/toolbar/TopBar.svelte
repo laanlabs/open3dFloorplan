@@ -23,6 +23,10 @@
   let activeFloorId = $state('');
   let editingName = $state(false);
   let exportOpen = $state(false);
+  let floorDropdownOpen = $state(false);
+  let floorDropdownRef: HTMLDivElement;
+  let renamingFloorId = $state<string | null>(null);
+  let renamingFloorName = $state('');
   import { triggerTip } from '$lib/stores/onboarding.svelte';
   let snapOn = $state(true);
   let exportRef: HTMLDivElement;
@@ -166,6 +170,10 @@
       if (exportOpen && exportRef && !exportRef.contains(e.target as Node)) {
         exportOpen = false;
       }
+      if (floorDropdownOpen && floorDropdownRef && !floorDropdownRef.contains(e.target as Node)) {
+        floorDropdownOpen = false;
+        renamingFloorId = null;
+      }
     }
     function handleKeydown(e: KeyboardEvent) {
       if (exportOpen) exportOpen = false;
@@ -258,23 +266,58 @@
 
   <div class="h-5 w-px bg-white/20"></div>
 
-  <!-- Floor selector as buttons -->
-  <div class="flex items-center gap-1">
-    {#each floors as fl}
-      <button
-        class="px-2 py-0.5 text-xs rounded transition-colors {fl.id === activeFloorId ? 'bg-white text-slate-800 font-semibold' : 'text-white/80 hover:bg-white/10'}"
-        onclick={() => setActiveFloor(fl.id)}
-        ondblclick={() => onRemoveFloor(fl.id)}
-        title={fl.id === activeFloorId ? 'Active floor (dbl-click to remove)' : 'Click to switch, dbl-click to remove'}
-      >{fl.name}</button>
-    {/each}
+  <!-- Floor selector dropdown -->
+  <div class="relative" bind:this={floorDropdownRef}>
     <button
-      onclick={onAddFloor}
-      class="text-white/80 hover:text-white text-xs hover:bg-white/10 px-1.5 py-0.5 rounded transition-colors"
-      title="Add Floor"
-      aria-label="Add Floor"
-    >+</button>
-    <span class="text-white/40 text-[10px] ml-1">{floors.length}F</span>
+      onclick={() => { floorDropdownOpen = !floorDropdownOpen; renamingFloorId = null; }}
+      class="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-white/90 hover:bg-white/10 rounded-lg transition-colors"
+      title="Switch floor"
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <span>{floors.find(f => f.id === activeFloorId)?.name ?? 'Floor'}</span>
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="opacity-60"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+    {#if floorDropdownOpen}
+      <div class="absolute left-0 top-full mt-1 bg-white rounded-lg shadow-xl border border-gray-200 py-1 min-w-[160px] z-50">
+        {#each floors as fl, i}
+          <div class="flex items-center gap-1 px-2 py-1 hover:bg-gray-50 group">
+            {#if renamingFloorId === fl.id}
+              <input
+                class="flex-1 text-sm text-gray-800 bg-blue-50 border border-blue-300 rounded px-1.5 py-0.5 outline-none"
+                bind:value={renamingFloorName}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') { updateProjectName; /* rename floor */ if (renamingFloorName.trim()) { /* update floor name */ const p = get(currentProject); if (p) { const f = p.floors.find(f => f.id === renamingFloorId); if (f) { f.name = renamingFloorName.trim(); currentProject.set({ ...p }); } } } renamingFloorId = null; }
+                  if (e.key === 'Escape') { renamingFloorId = null; }
+                }}
+                onblur={() => { if (renamingFloorName.trim()) { const p = get(currentProject); if (p) { const f = p.floors.find(f => f.id === renamingFloorId); if (f) { f.name = renamingFloorName.trim(); currentProject.set({ ...p }); } } } renamingFloorId = null; }}
+              />
+            {:else}
+              <button
+                class="flex-1 text-left text-sm py-0.5 {fl.id === activeFloorId ? 'text-blue-600 font-semibold' : 'text-gray-700'}"
+                onclick={() => { setActiveFloor(fl.id); floorDropdownOpen = false; }}
+                ondblclick={() => { renamingFloorId = fl.id; renamingFloorName = fl.name; }}
+                title="Click to switch · Double-click to rename"
+              >{fl.name}</button>
+            {/if}
+            {#if floors.length > 1}
+              <button
+                onclick={(e) => { e.stopPropagation(); onRemoveFloor(fl.id); }}
+                class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-opacity text-base leading-none px-0.5"
+                title="Remove floor"
+              >×</button>
+            {/if}
+          </div>
+        {/each}
+        <div class="h-px bg-gray-100 my-1"></div>
+        <button
+          onclick={() => { onAddFloor(); floorDropdownOpen = false; }}
+          class="w-full text-left px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 flex items-center gap-1.5 transition-colors"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Floor
+        </button>
+      </div>
+    {/if}
   </div>
 
   <div class="flex-1"></div>
@@ -300,9 +343,8 @@
     </svg>
   </button>
 
-  <!-- Select / Pan toggle -->
-  {#if mode === '2d'}
-  <div class="flex bg-white/15 rounded-full p-0.5">
+  <!-- Select / Pan toggle (Engineering only; dimmed in Design) -->
+  <div class="flex bg-white/15 rounded-full p-0.5 transition-opacity {mode === '3d' ? 'opacity-30 pointer-events-none' : ''}">
     <button
       onclick={() => panMode.set(false)}
       class="px-2 py-1 text-xs font-semibold rounded-full transition-colors {!$panMode ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
@@ -320,7 +362,6 @@
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-4 0v1"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>
     </button>
   </div>
-  {/if}
 
   <!-- Furniture visibility toggle -->
   <button
@@ -353,28 +394,26 @@
     >Collaboration</button>
   </div>
 
-  <!-- Zoom controls (2D only) -->
-  {#if mode === '2d'}
-    <div class="flex items-center gap-1 bg-white/15 rounded-full p-0.5">
-      <button
-        onclick={() => canvasZoom.update(z => Math.max(0.1, z / 1.25))}
-        class="w-7 h-7 flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors text-sm font-bold"
-        title="Zoom Out (−)"
-        aria-label="Zoom Out"
-      >−</button>
-      <button
-        onclick={() => canvasZoom.set(1)}
-        class="px-2 py-1 text-xs font-medium text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors min-w-[3rem] text-center"
-        title="Reset Zoom (100%)"
-      >{Math.round($canvasZoom * 100)}%</button>
-      <button
-        onclick={() => canvasZoom.update(z => Math.min(10, z * 1.25))}
-        class="w-7 h-7 flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors text-sm font-bold"
-        title="Zoom In (+)"
-        aria-label="Zoom In"
-      >+</button>
-    </div>
-  {/if}
+  <!-- Zoom controls (Engineering only; dimmed in Design) -->
+  <div class="flex items-center gap-1 bg-white/15 rounded-full p-0.5 transition-opacity {mode === '3d' ? 'opacity-30 pointer-events-none' : ''}">
+    <button
+      onclick={() => canvasZoom.update(z => Math.max(0.1, z / 1.25))}
+      class="w-7 h-7 flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors text-sm font-bold"
+      title="Zoom Out (−)"
+      aria-label="Zoom Out"
+    >−</button>
+    <button
+      onclick={() => canvasZoom.set(1)}
+      class="px-2 py-1 text-xs font-medium text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors min-w-[3rem] text-center"
+      title="Reset Zoom (100%)"
+    >{Math.round($canvasZoom * 100)}%</button>
+    <button
+      onclick={() => canvasZoom.update(z => Math.min(10, z * 1.25))}
+      class="w-7 h-7 flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors text-sm font-bold"
+      title="Zoom In (+)"
+      aria-label="Zoom In"
+    >+</button>
+  </div>
 
   <!-- Version History button -->
   <button
