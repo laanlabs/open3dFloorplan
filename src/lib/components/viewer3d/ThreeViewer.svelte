@@ -13,7 +13,15 @@
   import type { FurnitureDef } from '$lib/utils/furnitureCatalog';
   import { createFurnitureModel } from '$lib/utils/furnitureModels3d';
   import { createFurnitureModelWithGLB } from '$lib/utils/furnitureModelLoader';
-  import { addFurniture, removeFurniture, moveFurniture } from '$lib/stores/project';
+  import {
+    addFurniture, removeFurniture, moveFurniture, updateFurniture,
+    addStair, addColumn, addDoor, addWindow,
+    placingFurnitureId, placingStair, placingColumn, placingColumnShape,
+    placingDoorType, placingWindowType, selectedTool,
+    placingRoomPresetId, placingRoomTemplateName
+  } from '$lib/stores/project';
+  import { roomPresets } from '$lib/utils/roomPresets';
+  import { roomTemplates, placeRoomTemplate } from '$lib/utils/roomTemplates';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
   import { getMaterial } from '$lib/utils/materials';
   import { getWallTextureCanvas, getFloorTextureCanvas, setTextureLoadCallback } from '$lib/utils/textureGenerator';
@@ -44,6 +52,21 @@
   let selectedFurnitureId: string | null = null;
   let selectedWallId3D: string | null = null;
   const originalEmissive = new Map<THREE.Object3D, THREE.Color>();
+
+  // Unified active placement type
+  type PlacementType = 'none' | 'furniture' | 'stair' | 'column' | 'door' | 'window' | 'room';
+  let activePlacementType: PlacementType = 'none';
+  let activeDoorType: Door['type'] = 'single';
+  let activeWindowType: Win['type'] = 'standard';
+  let activeColumnShape: 'round' | 'square' = 'round';
+  let activeRoomPresetId: string | null = null;
+  let activeRoomTemplateName: string | null = null;
+
+  // Scene helpers for placement
+  let gridHelper: THREE.GridHelper | null = null;
+  let selectionBoxHelper: THREE.BoxHelper | null = null;
+  // Hovering on a wall (for door/window placement)
+  let wallHoverWallId: string | null = null;
 
   // 3D Edit mode — enables click-to-select
   let editMode = $state(false);
@@ -765,6 +788,7 @@
           selectedElementId.set(draggingFurnitureId);
           materialPickerWall = null;
           materialPickerPos = null;
+          updateSelectionBox();
         }
         draggingFurnitureId = null;
         markSceneDirty();
@@ -816,7 +840,61 @@
         return;
       }
 
-      // Furniture placement mode: place on floor
+      // Active placement mode: furniture / stair / column / room on floor
+      if (activePlacementType === 'furniture' && selectedCatalogId) {
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+          addFurniture(selectedCatalogId, { x: hit.x, y: hit.z });
+        }
+        return;
+      }
+      if (activePlacementType === 'stair') {
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+          addStair({ x: hit.x, y: hit.z });
+        }
+        return;
+      }
+      if (activePlacementType === 'column') {
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+          addColumn({ x: hit.x, y: hit.z }, activeColumnShape);
+        }
+        return;
+      }
+      if (activePlacementType === 'room' && activeRoomPresetId) {
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+          const preset = roomPresets.find(p => p.id === activeRoomPresetId);
+          if (preset) {
+            const template = activeRoomTemplateName
+              ? roomTemplates.find(t => t.name === activeRoomTemplateName) ?? null : null;
+            placeRoomTemplate(preset, { x: hit.x, y: hit.z }, template);
+            exitPlacementMode();
+          }
+        }
+        return;
+      }
+      // Door/window placement on walls
+      if (activePlacementType === 'door' || activePlacementType === 'window') {
+        if (wallHoverWallId) {
+          const hit = new THREE.Vector3();
+          // Raycast against wall meshes to get exact hit point
+          const wallMeshes: THREE.Object3D[] = [];
+          wallGroup.traverse((obj: any) => { if ((obj as THREE.Mesh).isMesh && obj.userData?.wallId) wallMeshes.push(obj); });
+          const wallHits = raycaster.intersectObjects(wallMeshes, false);
+          if (wallHits.length > 0) {
+            const pos = getWallHitPosition(wallHits[0].point, wallHoverWallId);
+            if (activePlacementType === 'door') {
+              addDoor(wallHoverWallId, pos, activeDoorType);
+            } else {
+              addWindow(wallHoverWallId, pos, activeWindowType);
+            }
+          }
+        }
+        return;
+      }
+      // Legacy path for furniturePlacementMode (toolbar button)
       if (furniturePlacementMode && selectedCatalogId) {
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
@@ -835,6 +913,7 @@
         selectedElementId.set(fid);
         materialPickerWall = null;
         materialPickerPos = null;
+        updateSelectionBox();
         return;
       }
 
@@ -848,6 +927,7 @@
         }
       }
       selectedFurnitureId = null;
+      updateSelectionBox();
       selectedElementId.set(hitWallId);
 
       if (hitWallId && currentFloor) {
@@ -863,29 +943,74 @@
     // Hover highlight in edit mode
     let hoveredMesh: THREE.Mesh | null = null;
     renderer.domElement.addEventListener('mousemove', (e) => {
-      // Furniture placement ghost preview
-      if (editMode && furniturePlacementMode && selectedCatalogId) {
-        const rect = renderer.domElement.getBoundingClientRect();
-        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-        raycaster.setFromCamera(mouse, camera);
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+
+      // Furniture placement ghost (from sidebar or legacy toolbar)
+      if (activePlacementType === 'furniture' || (furniturePlacementMode && selectedCatalogId)) {
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+          if (!ghostGroup && selectedCatalogId) createGhostPreview(selectedCatalogId);
+          if (ghostGroup) { ghostGroup.position.set(hit.x, 1.5, hit.z); ghostGroup.visible = true; }
+        } else if (ghostGroup) { ghostGroup.visible = false; }
+        renderer.domElement.style.cursor = 'crosshair';
+        markSceneDirty();
+        return;
+      }
+      // Stair / column placement ghost on floor
+      if (activePlacementType === 'stair' || activePlacementType === 'column') {
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
           if (!ghostGroup) {
-            createGhostPreview(selectedCatalogId);
+            if (activePlacementType === 'stair') createStructureGhost('stair');
+            else createStructureGhost('column', activeColumnShape);
           }
-          if (ghostGroup) {
-            ghostGroup.position.set(hit.x, 1.5, hit.z);
+          if (ghostGroup) { ghostGroup.position.set(hit.x, 0, hit.z); ghostGroup.visible = true; }
+        } else if (ghostGroup) { ghostGroup.visible = false; }
+        renderer.domElement.style.cursor = 'crosshair';
+        markSceneDirty();
+        return;
+      }
+      // Room placement ghost on floor
+      if (activePlacementType === 'room') {
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+          // Simple cross-hair indicator instead of full ghost
+          if (ghostGroup) { ghostGroup.position.set(hit.x, 2, hit.z); ghostGroup.visible = true; }
+        } else if (ghostGroup) { ghostGroup.visible = false; }
+        renderer.domElement.style.cursor = 'crosshair';
+        markSceneDirty();
+        return;
+      }
+      // Door / window ghost on walls
+      if (activePlacementType === 'door' || activePlacementType === 'window') {
+        const wallMeshes: THREE.Object3D[] = [];
+        wallGroup.traverse((obj: any) => { if ((obj as THREE.Mesh).isMesh && obj.userData?.wallId) wallMeshes.push(obj); });
+        const wallHits = raycaster.intersectObjects(wallMeshes, false);
+        if (wallHits.length > 0) {
+          const hit = wallHits[0];
+          wallHoverWallId = hit.object.userData.wallId as string;
+          const floor = get(activeFloor);
+          const wall = floor?.walls.find((w: Wall) => w.id === wallHoverWallId);
+          if (wall && ghostGroup) {
+            const dx = wall.end.x - wall.start.x;
+            const dz = wall.end.y - wall.start.y;
+            ghostGroup.position.set(hit.point.x, 0, hit.point.z);
+            ghostGroup.rotation.y = Math.atan2(dz, dx);
             ghostGroup.visible = true;
           }
-        } else if (ghostGroup) {
-          ghostGroup.visible = false;
+          renderer.domElement.style.cursor = 'crosshair';
+        } else {
+          wallHoverWallId = null;
+          if (ghostGroup) ghostGroup.visible = false;
+          renderer.domElement.style.cursor = 'default';
         }
-        renderer.domElement.style.cursor = 'crosshair';
+        markSceneDirty();
         return;
-      } else if (ghostGroup) {
-        ghostGroup.visible = false;
       }
+      if (ghostGroup) ghostGroup.visible = false;
 
       // Furniture drag — move model visually
       if (draggingFurnitureId) {
@@ -912,10 +1037,6 @@
         return;
       }
       renderer.domElement.style.cursor = 'pointer';
-      const rect = renderer.domElement.getBoundingClientRect();
-      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(mouse, camera);
       // Check furniture hover first
       const furnitureMeshes: THREE.Object3D[] = [];
       wallGroup.traverse(obj => { if ((obj as THREE.Mesh).isMesh && obj.userData.furnitureId) furnitureMeshes.push(obj); });
@@ -990,6 +1111,14 @@
 
     wallGroup = new THREE.Group();
     scene.add(wallGroup);
+
+    // Placement grid — hidden until an object is selected or being placed
+    gridHelper = new THREE.GridHelper(8000, 160, 0x555555, 0x333333);
+    (gridHelper.material as THREE.LineBasicMaterial).opacity = 0.3;
+    (gridHelper.material as THREE.LineBasicMaterial).transparent = true;
+    gridHelper.position.y = 1.8;
+    gridHelper.visible = false;
+    scene.add(gridHelper);
   }
 
   function createGhostPreview(catalogId: string) {
@@ -1030,6 +1159,49 @@
     scene.add(ghostGroup);
   }
 
+  function createStructureGhost(type: 'stair' | 'column', shape?: 'round' | 'square') {
+    removeGhostPreview();
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x4488ff, transparent: true, opacity: 0.45,
+      emissive: new THREE.Color(0x2244ff), emissiveIntensity: 0.3
+    });
+    const group = new THREE.Group();
+    let mesh: THREE.Mesh;
+    if (type === 'stair') {
+      mesh = new THREE.Mesh(new THREE.BoxGeometry(100, 30, 300), mat);
+      mesh.position.y = 15;
+    } else if (shape === 'square') {
+      mesh = new THREE.Mesh(new THREE.BoxGeometry(30, 280, 30), mat);
+      mesh.position.y = 140;
+    } else {
+      mesh = new THREE.Mesh(new THREE.CylinderGeometry(15, 15, 280, 16), mat);
+      mesh.position.y = 140;
+    }
+    group.add(mesh);
+    group.visible = false;
+    ghostGroup = group;
+    scene.add(ghostGroup);
+  }
+
+  function createDoorWindowGhost(type: 'door' | 'window', doorType?: Door['type']) {
+    removeGhostPreview();
+    const defWidths: Record<Door['type'], number> = { single: 90, double: 150, sliding: 180, french: 150, pocket: 90, bifold: 180 };
+    const w = type === 'door' ? (defWidths[doorType ?? 'single'] ?? 90) : 120;
+    const h = type === 'door' ? 210 : 120;
+    const yOffset = type === 'door' ? h / 2 : 90 + h / 2;
+    const mat = new THREE.MeshStandardMaterial({
+      color: type === 'door' ? 0xffaa44 : 0x88ccff, transparent: true, opacity: 0.55,
+      emissive: new THREE.Color(type === 'door' ? 0xaa6600 : 0x4488ff), emissiveIntensity: 0.4
+    });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, 10), mat);
+    mesh.position.y = yOffset;
+    const group = new THREE.Group();
+    group.add(mesh);
+    group.visible = false;
+    ghostGroup = group;
+    scene.add(ghostGroup);
+  }
+
   function removeGhostPreview() {
     if (ghostGroup) {
       scene.remove(ghostGroup);
@@ -1042,6 +1214,69 @@
       });
       ghostGroup = null;
     }
+  }
+
+  function updateGridVisibility() {
+    if (!gridHelper) return;
+    const shouldShow = activePlacementType !== 'none' || selectedFurnitureId !== null;
+    if (gridHelper.visible !== shouldShow) {
+      gridHelper.visible = shouldShow;
+      markSceneDirty();
+    }
+  }
+
+  function updateSelectionBox() {
+    if (selectionBoxHelper) { scene.remove(selectionBoxHelper); selectionBoxHelper = null; }
+    if (!selectedFurnitureId) { updateGridVisibility(); return; }
+    wallGroup.traverse((obj: any) => {
+      if (!selectionBoxHelper && obj.userData?.furnitureId === selectedFurnitureId && obj.parent === wallGroup) {
+        selectionBoxHelper = new THREE.BoxHelper(obj as THREE.Object3D, new THREE.Color(0x3388ff));
+        selectionBoxHelper.userData.isSelectionBox = true;
+        scene.add(selectionBoxHelper);
+      }
+    });
+    updateGridVisibility();
+    markSceneDirty();
+  }
+
+  function getWallHitPosition(hitPoint: THREE.Vector3, wallId: string): number {
+    const floor = get(activeFloor);
+    const wall = floor?.walls.find((w: Wall) => w.id === wallId);
+    if (!wall) return 0.5;
+    const wx = wall.end.x - wall.start.x;
+    const wz = wall.end.y - wall.start.y;
+    const wallLen = Math.sqrt(wx * wx + wz * wz);
+    if (wallLen < 1) return 0.5;
+    const hx = hitPoint.x - wall.start.x;
+    const hz = hitPoint.z - wall.start.y;
+    const dot = (hx * wx + hz * wz) / wallLen;
+    return Math.max(0.05, Math.min(0.95, dot / wallLen));
+  }
+
+  function enterPlacementMode(type: PlacementType) {
+    activePlacementType = type;
+    editMode = true;
+    if (walkthroughMode) exitWalkthroughMode();
+    if (type === 'door') createDoorWindowGhost('door', activeDoorType);
+    else if (type === 'window') createDoorWindowGhost('window');
+    else if (type === 'stair') createStructureGhost('stair');
+    else if (type === 'column') createStructureGhost('column', activeColumnShape);
+    updateGridVisibility();
+    markSceneDirty();
+  }
+
+  function exitPlacementMode() {
+    activePlacementType = 'none';
+    furniturePlacementMode = false;
+    selectedCatalogId = null;
+    removeGhostPreview();
+    // Clear the placement signals so BuildPanel knows placement ended
+    placingFurnitureId.set(null);
+    placingStair.set(false);
+    placingColumn.set(false);
+    placingRoomPresetId.set(null);
+    updateGridVisibility();
+    markSceneDirty();
   }
 
   function autoCenterCamera(floor: Floor) {
@@ -1967,31 +2202,49 @@
       removeFurniture(selectedFurnitureId);
       selectedFurnitureId = null;
       selectedElementId.set(null);
+      updateSelectionBox();
       markSceneDirty();
       return;
     }
-    // ESC exits edit mode
-    if (event.code === 'Escape' && editMode && !walkthroughMode) {
-      if (furniturePlacementMode) {
-        furniturePlacementMode = false;
-        furniturePickerOpen = false;
-        selectedCatalogId = null;
-        removeGhostPreview();
+    // R — rotate selected furniture by 45°
+    if (event.code === 'KeyR' && editMode && !walkthroughMode && selectedFurnitureId) {
+      const floor = get(activeFloor);
+      const item = floor?.furniture.find((f: any) => f.id === selectedFurnitureId);
+      if (item) {
+        updateFurniture(selectedFurnitureId, { rotation: ((item.rotation ?? 0) + 45) % 360 });
+        markSceneDirty();
+      }
+      return;
+    }
+    // ESC exits active placement mode, then selection, then edit mode
+    if (event.code === 'Escape' && !walkthroughMode) {
+      if (activePlacementType !== 'none') {
+        exitPlacementMode();
         return;
       }
-      if (selectedFurnitureId) {
-        selectedFurnitureId = null;
+      if (editMode) {
+        if (furniturePlacementMode) {
+          furniturePlacementMode = false;
+          furniturePickerOpen = false;
+          selectedCatalogId = null;
+          removeGhostPreview();
+          return;
+        }
+        if (selectedFurnitureId) {
+          selectedFurnitureId = null;
+          selectedElementId.set(null);
+          updateSelectionBox();
+          return;
+        }
+        if (materialPickerWall) {
+          materialPickerWall = null;
+          materialPickerPos = null;
+          return;
+        }
+        editMode = false;
         selectedElementId.set(null);
         return;
       }
-      if (materialPickerWall) {
-        materialPickerWall = null;
-        materialPickerPos = null;
-        return;
-      }
-      editMode = false;
-      selectedElementId.set(null);
-      return;
     }
     if (!walkthroughMode) return;
     
@@ -2239,11 +2492,99 @@
       }
     });
 
+    // React to placement signals from BuildPanel
+    const unsubPlacingFurniture = placingFurnitureId.subscribe((id) => {
+      if (id) {
+        activePlacementType = 'furniture';
+        selectedCatalogId = id;
+        furniturePlacementMode = true;
+        editMode = true;
+        if (walkthroughMode) exitWalkthroughMode();
+        removeGhostPreview();
+        createGhostPreview(id);
+        updateGridVisibility();
+        markSceneDirty();
+      } else if (activePlacementType === 'furniture') {
+        activePlacementType = 'none';
+        furniturePlacementMode = false;
+        selectedCatalogId = null;
+        removeGhostPreview();
+        updateGridVisibility();
+        markSceneDirty();
+      }
+    });
+
+    const unsubPlacingStair = placingStair.subscribe((v) => {
+      if (v) { enterPlacementMode('stair'); }
+      else if (activePlacementType === 'stair') { activePlacementType = 'none'; removeGhostPreview(); updateGridVisibility(); }
+    });
+
+    const unsubPlacingColumn = placingColumn.subscribe((v) => {
+      if (v) {
+        activeColumnShape = get(placingColumnShape);
+        enterPlacementMode('column');
+      } else if (activePlacementType === 'column') {
+        activePlacementType = 'none'; removeGhostPreview(); updateGridVisibility();
+      }
+    });
+
+    const unsubPlacingColumnShape = placingColumnShape.subscribe((shape) => {
+      activeColumnShape = shape;
+      if (activePlacementType === 'column') { removeGhostPreview(); createStructureGhost('column', shape); }
+    });
+
+    const unsubPlacingDoorType = placingDoorType.subscribe((type) => {
+      activeDoorType = type;
+    });
+
+    const unsubPlacingWindowType = placingWindowType.subscribe((type) => {
+      activeWindowType = type;
+    });
+
+    const unsubSelectedTool = selectedTool.subscribe((tool) => {
+      if (tool === 'door') {
+        enterPlacementMode('door');
+      } else if (tool === 'window') {
+        enterPlacementMode('window');
+      } else if (activePlacementType === 'door' || activePlacementType === 'window') {
+        activePlacementType = 'none'; removeGhostPreview(); updateGridVisibility();
+      }
+    });
+
+    const unsubPlacingRoom = placingRoomPresetId.subscribe((id) => {
+      if (id) {
+        activeRoomPresetId = id;
+        activeRoomTemplateName = get(placingRoomTemplateName);
+        activePlacementType = 'room';
+        editMode = true;
+        if (walkthroughMode) exitWalkthroughMode();
+        // Simple crosshair ghost
+        removeGhostPreview();
+        const mat = new THREE.MeshStandardMaterial({ color: 0x4488ff, transparent: true, opacity: 0.5, emissive: new THREE.Color(0x2244ff), emissiveIntensity: 0.4 });
+        const ringGeo = new THREE.RingGeometry(40, 50, 32);
+        const ring = new THREE.Mesh(ringGeo, mat);
+        ring.rotation.x = -Math.PI / 2;
+        const g = new THREE.Group(); g.add(ring); g.visible = false;
+        ghostGroup = g; scene.add(ghostGroup);
+        updateGridVisibility(); markSceneDirty();
+      } else if (activePlacementType === 'room') {
+        activePlacementType = 'none'; removeGhostPreview(); updateGridVisibility();
+      }
+    });
+
     return () => {
       resizeObs.disconnect();
       unsub();
       unsubRooms();
       unsubSel();
+      unsubPlacingFurniture();
+      unsubPlacingStair();
+      unsubPlacingColumn();
+      unsubPlacingColumnShape();
+      unsubPlacingDoorType();
+      unsubPlacingWindowType();
+      unsubSelectedTool();
+      unsubPlacingRoom();
       cancelAnimationFrame(animId);
       document.removeEventListener('keydown', onKeyDown, false);
       document.removeEventListener('keyup', onKeyUp, false);
@@ -2610,10 +2951,20 @@
           <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
           <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
         </svg>
-        {#if furniturePlacementMode}
-          🪑 Click floor to place {selectedCatalogId ? getCatalogItem(selectedCatalogId)?.name ?? 'furniture' : 'furniture'} • ESC to cancel
+        {#if activePlacementType === 'furniture' || furniturePlacementMode}
+          🪑 Click floor to place {selectedCatalogId ? (getCatalogItem(selectedCatalogId)?.name ?? 'furniture') : 'furniture'} • ESC to cancel
+        {:else if activePlacementType === 'stair'}
+          🪜 Click floor to place stair • ESC to cancel
+        {:else if activePlacementType === 'column'}
+          🏛️ Click floor to place {activeColumnShape} column • ESC to cancel
+        {:else if activePlacementType === 'door'}
+          🚪 Hover over a wall and click to place door • ESC to cancel
+        {:else if activePlacementType === 'window'}
+          🪟 Hover over a wall and click to place window • ESC to cancel
+        {:else if activePlacementType === 'room'}
+          🏠 Click floor to place room • ESC to cancel
         {:else}
-          🪣 Click walls to paint materials • ESC to close picker or exit
+          🪣 Click walls to paint • R to rotate selected • Del to delete • ESC to exit
         {/if}
       </div>
     </div>

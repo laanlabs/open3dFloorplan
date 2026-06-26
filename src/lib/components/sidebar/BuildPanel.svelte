@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { selectedTool, placingFurnitureId, placingDoorType, placingWindowType, placingStair, addStair, placingColumn, placingColumnShape, activeFloor, setBackgroundImage, canvasCamX, canvasCamY } from '$lib/stores/project';
+  import { selectedTool, placingFurnitureId, placingDoorType, placingWindowType, placingStair, addStair, placingColumn, placingColumnShape, activeFloor, setBackgroundImage, canvasCamX, canvasCamY, viewMode, placingRoomPresetId, placingRoomTemplateName } from '$lib/stores/project';
+  import { get } from 'svelte/store';
   import type { Tool } from '$lib/stores/project';
   import type { Door, Window as Win } from '$lib/models/types';
   import { roomPresets, placePreset } from '$lib/utils/roomPresets';
@@ -59,7 +60,13 @@
 
   function onPresetClick(presetId: string, templateName?: string) {
     const preset = roomPresets.find(p => p.id === presetId);
-    if (preset) {
+    if (!preset) return;
+    if (get(viewMode) === '3d') {
+      // In Design mode: hand off to ThreeViewer for active cursor placement
+      placingRoomPresetId.set(presetId);
+      placingRoomTemplateName.set(templateName ?? null);
+    } else {
+      // In Engineering mode: instant placement at camera center
       let cx = 0, cy = 0;
       canvasCamX.subscribe(v => { cx = v; })();
       canvasCamY.subscribe(v => { cy = v; })();

@@ -538,6 +538,10 @@ export const placingRotation = writable<number>(0);
 export const placingDoorType = writable<Door['type']>('single');
 /** Window subtype currently selected for placement */
 export const placingWindowType = writable<import('$lib/models/types').Window['type']>('standard');
+/** Room preset id currently being placed in 3D (null = not placing) */
+export const placingRoomPresetId = writable<string | null>(null);
+/** Room template name for the current 3D room placement (null = use preset default) */
+export const placingRoomTemplateName = writable<string | null>(null);
 
 /** Duplicate a door onto the same wall */
 export function duplicateDoor(id: string): string | null {
