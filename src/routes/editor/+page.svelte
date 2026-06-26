@@ -27,7 +27,7 @@
     }
   });
 
-  let mode = $state<'2d' | '3d'>('2d');
+  let mode = $state<'2d' | '3d'>('3d');
   let ready = $state(false);
   let showHelp = $state(false);
   let showUndoHistory = $state(false);
@@ -83,9 +83,8 @@
   <div class="h-screen flex flex-col overflow-hidden">
     <TopBar />
     <div class="flex flex-1 overflow-hidden">
-      {#if mode === '2d'}
-        <BuildPanel />
-      {/if}
+      <BuildPanel />
+
       <div class="flex-1 min-w-0 relative">
         {#if mode === '2d'}
           <FloorPlanCanvas />

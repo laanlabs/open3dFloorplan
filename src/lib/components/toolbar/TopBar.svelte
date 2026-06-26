@@ -336,16 +336,21 @@
 
   <div class="h-5 w-px bg-white/20"></div>
 
-  <!-- 2D/3D pill toggle -->
+  <!-- Mode pill toggle: Design (3D) | Engineering (2D) | Collaboration (disabled) -->
   <div class="flex bg-white/15 rounded-full p-0.5">
-    <button
-      onclick={() => setMode('2d')}
-      class="px-3 py-1 text-xs font-semibold rounded-full transition-colors {mode === '2d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
-    >2D</button>
     <button
       onclick={() => setMode('3d')}
       class="px-3 py-1 text-xs font-semibold rounded-full transition-colors {mode === '3d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
-    >3D</button>
+    >Design</button>
+    <button
+      onclick={() => setMode('2d')}
+      class="px-3 py-1 text-xs font-semibold rounded-full transition-colors {mode === '2d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+    >Engineering</button>
+    <button
+      disabled
+      class="px-3 py-1 text-xs font-semibold rounded-full text-white/30 cursor-not-allowed"
+      title="Coming soon"
+    >Collaboration</button>
   </div>
 
   <!-- Zoom controls (2D only) -->

@@ -13,7 +13,7 @@
   import type { FurnitureDef } from '$lib/utils/furnitureCatalog';
   import { createFurnitureModel } from '$lib/utils/furnitureModels3d';
   import { createFurnitureModelWithGLB } from '$lib/utils/furnitureModelLoader';
-  import { addFurniture } from '$lib/stores/project';
+  import { addFurniture, removeFurniture, moveFurniture } from '$lib/stores/project';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
   import { getMaterial } from '$lib/utils/materials';
   import { getWallTextureCanvas, getFloorTextureCanvas, setTextureLoadCallback } from '$lib/utils/textureGenerator';
@@ -33,10 +33,15 @@
   let savedRooms: Room[] = [];
   let wallGroup: THREE.Group;
   
-  // Raycasting for wall selection in 3D
+  // Raycasting for wall/furniture selection in 3D
   const raycaster = new THREE.Raycaster();
   const mouse = new THREE.Vector2();
   const wallMeshMap = new Map<THREE.Object3D, string>(); // mesh → wallId
+
+  // Furniture drag state
+  let draggingFurnitureId: string | null = null;
+  let dragPointerDownPos = { x: 0, y: 0 };
+  let selectedFurnitureId: string | null = null;
   let selectedWallId3D: string | null = null;
   const originalEmissive = new Map<THREE.Object3D, THREE.Color>();
 
@@ -688,7 +693,7 @@
     groundMat.polygonOffsetUnits = 2;
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -1;
+    ground.position.y = -0.01;
     ground.receiveShadow = true;
     scene.add(ground);
 
@@ -712,17 +717,63 @@
     // Mark dirty when orbit controls move the camera
     controls.addEventListener('change', markSceneDirty);
 
-    // Click-to-select walls via raycasting
+    // Click-to-select walls/furniture via raycasting
     let pointerDownPos = { x: 0, y: 0 };
     renderer.domElement.addEventListener('pointerdown', (e) => {
       pointerDownPos = { x: e.clientX, y: e.clientY };
+      dragPointerDownPos = { x: e.clientX, y: e.clientY };
+      draggingFurnitureId = null;
+
+      if (!editMode || furniturePlacementMode || walkthroughMode || cameraPlacementMode) return;
+
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+
+      // Check if pointer is on a furniture object — if so, prepare for drag
+      const allMeshes: THREE.Object3D[] = [];
+      wallGroup.traverse(obj => { if ((obj as THREE.Mesh).isMesh && obj.userData.furnitureId) allMeshes.push(obj); });
+      const furnitureHits = raycaster.intersectObjects(allMeshes, false);
+      if (furnitureHits.length > 0) {
+        const hitId = furnitureHits[0].object.userData.furnitureId as string;
+        draggingFurnitureId = hitId;
+        controls.enabled = false; // disable orbit while dragging furniture
+      }
     });
     renderer.domElement.addEventListener('pointerup', (e) => {
-      // Only select in edit mode, and only if mouse didn't move much (not a drag/orbit)
+      controls.enabled = true;
+
+      const totalDx = e.clientX - dragPointerDownPos.x;
+      const totalDy = e.clientY - dragPointerDownPos.y;
+      const wasDrag = Math.hypot(totalDx, totalDy) > 5;
+
+      // Finalize furniture drag — commit new position to store
+      if (draggingFurnitureId) {
+        if (wasDrag) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          const hit = new THREE.Vector3();
+          if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+            moveFurniture(draggingFurnitureId, { x: hit.x, y: hit.z });
+          }
+        } else {
+          // Tap without drag → select
+          selectedFurnitureId = draggingFurnitureId;
+          selectedElementId.set(draggingFurnitureId);
+          materialPickerWall = null;
+          materialPickerPos = null;
+        }
+        draggingFurnitureId = null;
+        markSceneDirty();
+        return;
+      }
+
+      // Only process clicks in edit mode
       if (!editMode) return;
-      const dx = e.clientX - pointerDownPos.x;
-      const dy = e.clientY - pointerDownPos.y;
-      if (Math.hypot(dx, dy) > 5) return;
+      if (wasDrag) return;
       if (walkthroughMode) return;
 
       const rect = renderer.domElement.getBoundingClientRect();
@@ -735,7 +786,6 @@
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
           if (!cameraPlaced) {
-            // First click: place camera position
             cameraPosition = { x: hit.x, y: cameraHeight, z: hit.z };
             cameraLookAt = { x: hit.x + 200, y: cameraHeight * 0.75, z: hit.z };
             cameraBaseDir = { x: 1, z: 0 };
@@ -747,7 +797,6 @@
             cameraPreviewOpen = true;
             cameraPreviewDirty = true;
           } else {
-            // Second click: set look-at direction
             cameraLookAt = { x: hit.x, y: cameraHeight * 0.75, z: hit.z };
             const dx = hit.x - cameraPosition.x;
             const dz = hit.z - cameraPosition.z;
@@ -769,17 +818,27 @@
 
       // Furniture placement mode: place on floor
       if (furniturePlacementMode && selectedCatalogId) {
-        raycaster.setFromCamera(mouse, camera);
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
-          // Convert 3D (x, z) to 2D (x, y)
-          const pos2D = { x: hit.x, y: hit.z };
-          addFurniture(selectedCatalogId, pos2D);
-          // Scene will rebuild via store subscription
+          addFurniture(selectedCatalogId, { x: hit.x, y: hit.z });
         }
         return;
       }
 
+      // Try to hit furniture first, then walls
+      const allFurnitureMeshes: THREE.Object3D[] = [];
+      wallGroup.traverse(obj => { if ((obj as THREE.Mesh).isMesh && obj.userData.furnitureId) allFurnitureMeshes.push(obj); });
+      const furnitureHits = raycaster.intersectObjects(allFurnitureMeshes, false);
+      if (furnitureHits.length > 0) {
+        const fid = furnitureHits[0].object.userData.furnitureId as string;
+        selectedFurnitureId = fid;
+        selectedElementId.set(fid);
+        materialPickerWall = null;
+        materialPickerPos = null;
+        return;
+      }
+
+      // Fall back to wall selection
       const intersects = raycaster.intersectObjects(wallGroup.children, false);
       let hitWallId: string | null = null;
       for (const hit of intersects) {
@@ -788,9 +847,9 @@
           break;
         }
       }
+      selectedFurnitureId = null;
       selectedElementId.set(hitWallId);
-      
-      // Show/hide material picker
+
       if (hitWallId && currentFloor) {
         const hitWall = currentFloor.walls.find(w => w.id === hitWallId) ?? null;
         materialPickerWall = hitWall;
@@ -828,6 +887,26 @@
         ghostGroup.visible = false;
       }
 
+      // Furniture drag — move model visually
+      if (draggingFurnitureId) {
+        const rect2 = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((e.clientX - rect2.left) / rect2.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect2.top) / rect2.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+          // Update model position live for visual feedback
+          wallGroup.traverse(obj => {
+            if (obj.userData.furnitureId === draggingFurnitureId && obj.parent === wallGroup) {
+              obj.position.set(hit.x, 1.5, hit.z);
+            }
+          });
+          markSceneDirty();
+        }
+        renderer.domElement.style.cursor = 'grabbing';
+        return;
+      }
+
       if (!editMode) {
         if (hoveredMesh) { hoveredMesh = null; renderer.domElement.style.cursor = ''; }
         return;
@@ -837,6 +916,14 @@
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
+      // Check furniture hover first
+      const furnitureMeshes: THREE.Object3D[] = [];
+      wallGroup.traverse(obj => { if ((obj as THREE.Mesh).isMesh && obj.userData.furnitureId) furnitureMeshes.push(obj); });
+      const fhits = raycaster.intersectObjects(furnitureMeshes, false);
+      if (fhits.length > 0) {
+        renderer.domElement.style.cursor = 'grab';
+        return;
+      }
       const intersects = raycaster.intersectObjects(wallGroup.children, false);
       const hit = intersects.find(i => i.object.userData.wallId);
       if (hit && hit.object !== hoveredMesh) {
@@ -1517,6 +1604,8 @@
         model.scale.x *= fi.scale.x;
         model.scale.z *= fi.scale.y;
       }
+      model.userData.furnitureId = fi.id;
+      model.traverse(child => { child.userData.furnitureId = fi.id; });
       wallGroup.add(model);
     }
 
@@ -1873,6 +1962,14 @@
   }
 
   function onKeyDown(event: KeyboardEvent) {
+    // Delete/Backspace — remove selected furniture in edit mode
+    if ((event.code === 'Delete' || event.code === 'Backspace') && editMode && !walkthroughMode && selectedFurnitureId) {
+      removeFurniture(selectedFurnitureId);
+      selectedFurnitureId = null;
+      selectedElementId.set(null);
+      markSceneDirty();
+      return;
+    }
     // ESC exits edit mode
     if (event.code === 'Escape' && editMode && !walkthroughMode) {
       if (furniturePlacementMode) {
@@ -1880,6 +1977,11 @@
         furniturePickerOpen = false;
         selectedCatalogId = null;
         removeGhostPreview();
+        return;
+      }
+      if (selectedFurnitureId) {
+        selectedFurnitureId = null;
+        selectedElementId.set(null);
         return;
       }
       if (materialPickerWall) {

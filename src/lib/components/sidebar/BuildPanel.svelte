@@ -13,7 +13,19 @@
   import type { Project } from '$lib/models/types';
 
   // AreaSummaryPanel moved to top bar dialog
-  let activeTab = $state<'draw' | 'rooms' | 'objects'>('draw');
+  let activeTab = $state<'draw' | 'furniture'>('draw');
+
+  // Build sub-section open states
+  let wallOpen = $state(true);
+  let flooringOpen = $state(false);
+  let ceilingOpen = $state(false);
+  let openingOpen = $state(true);
+  let structuresOpen = $state(false);
+  let roomOpen = $state(false);
+  let annotateOpen = $state(false);
+  let importOpen = $state(false);
+
+  // Legacy — kept for compat; unused after restructure
   let constructionOpen = $state(true);
   let selectedCategory = $state<string>('All');
   let thumbsReady = $state(0); // increment to trigger reactivity
@@ -312,242 +324,287 @@
       onclick={() => activeTab = 'draw'}
     >Build</button>
     <button
-      class="flex-1 py-2.5 text-xs font-semibold uppercase tracking-wide {activeTab === 'rooms' ? 'text-slate-800 border-b-2 border-blue-500 bg-blue-50' : 'text-gray-500 hover:text-gray-700'}"
-      onclick={() => activeTab = 'rooms'}
-    >Rooms</button>
-    <button
-      class="flex-1 py-2.5 text-xs font-semibold uppercase tracking-wide {activeTab === 'objects' ? 'text-slate-800 border-b-2 border-blue-500 bg-blue-50' : 'text-gray-500 hover:text-gray-700'}"
-      onclick={() => activeTab = 'objects'}
-    >Objects</button>
+      class="flex-1 py-2.5 text-xs font-semibold uppercase tracking-wide {activeTab === 'furniture' ? 'text-slate-800 border-b-2 border-blue-500 bg-blue-50' : 'text-gray-500 hover:text-gray-700'}"
+      onclick={() => activeTab = 'furniture'}
+    >Furniture</button>
   </div>
 
   <div class="flex-1 overflow-y-auto p-3">
     {#if activeTab === 'draw'}
-      <div class="space-y-1">
-        <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Tools</h3>
-        <button
-          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'select' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-          onclick={() => setTool('select')}
-        >
-          <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'select' ? 'bg-blue-100' : ''}">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/></svg>
-          </div>
-          <div class="text-left">
-            <div class="font-medium">Select <span class="text-gray-400 text-xs ml-1">V</span></div>
-            <div class="text-xs text-gray-400">Click to select elements</div>
-          </div>
-        </button>
-        <button
-          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'wall' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-          onclick={() => setTool('wall')}
-        >
-          <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'wall' ? 'bg-blue-100' : ''}">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="1"/><line x1="7" y1="8" x2="7" y2="16"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="17" y1="8" x2="17" y2="16"/></svg>
-          </div>
-          <div class="text-left">
-            <div class="font-medium">Draw Wall <span class="text-gray-400 text-xs ml-1">W</span></div>
-            <div class="text-xs text-gray-400">Click to draw, dbl-click to finish</div>
-          </div>
-        </button>
+      <div class="space-y-0.5">
 
-        <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2 mt-3">Structure</h3>
-        <button
-          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {isPlacingStair ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-          onclick={onPlaceStair}
-        >
-          <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {isPlacingStair ? 'bg-blue-100' : ''}">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 5h-5V2h-3v6h-4V5H7v6H2v3h5v3h3v-3h4v3h3v-6h5z"/></svg>
-          </div>
-          <div class="text-left">
-            <div class="font-medium">Add Stairs</div>
-            <div class="text-xs text-gray-400">Click to place stairs</div>
-          </div>
+        <!-- 1. Wall -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => wallOpen = !wallOpen}>
+          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Wall</span>
+          <span class="text-gray-400 text-xs">{wallOpen ? '▼' : '▶'}</span>
         </button>
+        {#if wallOpen}
+          <div class="space-y-1 pb-2">
+            <button
+              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'select' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+              onclick={() => setTool('select')}
+            >
+              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'select' ? 'bg-blue-100' : ''}">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/></svg>
+              </div>
+              <div class="text-left">
+                <div class="font-medium">Select <span class="text-gray-400 text-xs ml-1">V</span></div>
+                <div class="text-xs text-gray-400">Click to select elements</div>
+              </div>
+            </button>
+            <button
+              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'wall' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+              onclick={() => setTool('wall')}
+            >
+              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'wall' ? 'bg-blue-100' : ''}">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="1"/><line x1="7" y1="8" x2="7" y2="16"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="17" y1="8" x2="17" y2="16"/></svg>
+              </div>
+              <div class="text-left">
+                <div class="font-medium">Draw Wall <span class="text-gray-400 text-xs ml-1">W</span></div>
+                <div class="text-xs text-gray-400">Click to draw, dbl-click to finish</div>
+              </div>
+            </button>
+          </div>
+        {/if}
 
-        <div class="flex gap-2">
-          <button
-            class="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors {isPlacingColumn ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-            onclick={() => onPlaceColumn('round')}
-          >
-            <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {isPlacingColumn ? 'bg-blue-100' : ''}">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="6"/><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+        <!-- 2. Flooring -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => flooringOpen = !flooringOpen}>
+          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Flooring</span>
+          <span class="text-gray-400 text-xs">{flooringOpen ? '▼' : '▶'}</span>
+        </button>
+        {#if flooringOpen}
+          <div class="pb-2 px-2">
+            <p class="text-xs text-gray-400 py-2">Select a room in the Design (3D) view to set floor materials.</p>
+          </div>
+        {/if}
+
+        <!-- 3. Ceiling -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => ceilingOpen = !ceilingOpen}>
+          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Ceiling</span>
+          <span class="text-gray-400 text-xs">{ceilingOpen ? '▼' : '▶'}</span>
+        </button>
+        {#if ceilingOpen}
+          <div class="pb-2 px-2">
+            <p class="text-xs text-gray-400 py-2">Ceiling height is set per-wall via wall properties.</p>
+          </div>
+        {/if}
+
+        <!-- 4. Opening (Door + Window) -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => openingOpen = !openingOpen}>
+          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Opening</span>
+          <span class="text-gray-400 text-xs">{openingOpen ? '▼' : '▶'}</span>
+        </button>
+        {#if openingOpen}
+          <div class="pb-2">
+            <p class="text-[10px] text-gray-400 px-2 mb-1">Doors</p>
+            <div class="grid grid-cols-2 gap-2 mb-3">
+              {#each doorCatalog as dc}
+                <button
+                  class="flex flex-col items-center gap-1 p-2.5 rounded-lg border-2 transition-colors cursor-grab active:cursor-grabbing {currentTool === 'door' && selectedDoorType === dc.type ? 'border-blue-400 bg-blue-50' : 'border-gray-100 hover:border-gray-200'}"
+                  onclick={() => setDoorType(dc.type)}
+                  draggable="true"
+                  ondragstart={(e) => { e.dataTransfer?.setData('application/o3d-type', 'door'); e.dataTransfer?.setData('application/o3d-id', dc.type); }}
+                >
+                  <div class="w-9 h-9 rounded-lg bg-amber-50 flex items-center justify-center">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{dc.icon}"/></svg>
+                  </div>
+                  <span class="text-xs font-medium text-gray-600">{dc.name}</span>
+                  <span class="text-[10px] text-gray-400">{dc.desc}</span>
+                </button>
+              {/each}
             </div>
-            <div class="text-left">
-              <div class="font-medium text-xs">Round Column</div>
+            <p class="text-[10px] text-gray-400 px-2 mb-1">Windows</p>
+            <div class="grid grid-cols-2 gap-2">
+              {#each windowCatalog as wc}
+                <button
+                  class="flex flex-col items-center gap-1 p-2.5 rounded-lg border-2 transition-colors cursor-grab active:cursor-grabbing {currentTool === 'window' && selectedWindowType === wc.type ? 'border-blue-400 bg-blue-50' : 'border-gray-100 hover:border-gray-200'}"
+                  onclick={() => setWindowType(wc.type)}
+                  draggable="true"
+                  ondragstart={(e) => { e.dataTransfer?.setData('application/o3d-type', 'window'); e.dataTransfer?.setData('application/o3d-id', wc.type); }}
+                >
+                  <div class="w-9 h-9 rounded-lg bg-cyan-50 flex items-center justify-center">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0e7490" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+                  </div>
+                  <span class="text-xs font-medium text-gray-600">{wc.name}</span>
+                  <span class="text-[10px] text-gray-400">{wc.desc}</span>
+                </button>
+              {/each}
             </div>
-          </button>
-          <button
-            class="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors {isPlacingColumn ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-            onclick={() => onPlaceColumn('square')}
-          >
-            <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {isPlacingColumn ? 'bg-blue-100' : ''}">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"/><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
-            </div>
-            <div class="text-left">
-              <div class="font-medium text-xs">Square Column</div>
-            </div>
-          </button>
-        </div>
+          </div>
+        {/if}
 
-        <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2 mt-3">Annotate</h3>
-        <button
-          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'text' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-          onclick={() => setTool('text')}
-        >
-          <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'text' ? 'bg-blue-100' : ''}">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="8" y1="20" x2="16" y2="20"/></svg>
-          </div>
-          <div class="text-left">
-            <div class="font-medium">Text Label</div>
-            <div class="text-xs text-gray-400">Add text annotations (T)</div>
-          </div>
+        <!-- 5. Structures (Staircase + Column) -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => structuresOpen = !structuresOpen}>
+          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Structures</span>
+          <span class="text-gray-400 text-xs">{structuresOpen ? '▼' : '▶'}</span>
         </button>
-
-        <button
-          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'annotate' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-          onclick={() => setTool('annotate')}
-        >
-          <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'annotate' ? 'bg-blue-100' : ''}">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><line x1="16" y1="5" x2="22" y2="5"/><line x1="19" y1="2" x2="19" y2="8"/><line x1="3" y1="12" x2="12" y2="12"/></svg>
-          </div>
-          <div class="text-left">
-            <div class="font-medium">Dimension</div>
-            <div class="text-xs text-gray-400">Add dimension annotations (N)</div>
-          </div>
-        </button>
-        <button
-          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'measure' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-          onclick={() => setTool('measure')}
-        >
-          <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'measure' ? 'bg-blue-100' : ''}">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h5l2-7 4 14 2-7h7"/></svg>
-          </div>
-          <div class="text-left">
-            <div class="font-medium">Measure</div>
-            <div class="text-xs text-gray-400">Measure distances (M)</div>
-          </div>
-        </button>
-
-        <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2 mt-3">Import</h3>
-        <button
-          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors hover:bg-gray-50 text-gray-700"
-          onclick={onImportImage}
-        >
-          <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
-          </div>
-          <div class="text-left">
-            <div class="font-medium">Import Image</div>
-            <div class="text-xs text-gray-400">Floor plan background</div>
-          </div>
-        </button>
-        <button
-          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors hover:bg-gray-50 text-gray-700"
-          onclick={onImportRoomPlan}
-        >
-          <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-          </div>
-          <div class="text-left">
-            <div class="font-medium">Import RoomPlan</div>
-            <div class="text-xs text-gray-400">iOS LiDAR scan (.json/.zip)</div>
-          </div>
-        </button>
-
-        <button
-          class="w-full flex items-center justify-between px-1 py-2 mt-3"
-          onclick={() => constructionOpen = !constructionOpen}
-        >
-          <h3 class="text-xs font-semibold text-gray-400 uppercase">Doors</h3>
-          <span class="text-gray-400 text-xs">{constructionOpen ? '▼' : '▶'}</span>
-        </button>
-
-        {#if constructionOpen}
-          <div class="grid grid-cols-2 gap-2 mb-3">
-            {#each doorCatalog as dc}
+        {#if structuresOpen}
+          <div class="space-y-1 pb-2">
+            <button
+              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {isPlacingStair ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+              onclick={onPlaceStair}
+            >
+              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {isPlacingStair ? 'bg-blue-100' : ''}">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 5h-5V2h-3v6h-4V5H7v6H2v3h5v3h3v-3h4v3h3v-6h5z"/></svg>
+              </div>
+              <div class="text-left">
+                <div class="font-medium">Staircase</div>
+                <div class="text-xs text-gray-400">Click to place stairs</div>
+              </div>
+            </button>
+            <div class="flex gap-2">
               <button
-                class="flex flex-col items-center gap-1 p-2.5 rounded-lg border-2 transition-colors cursor-grab active:cursor-grabbing {currentTool === 'door' && selectedDoorType === dc.type ? 'border-blue-400 bg-blue-50' : 'border-gray-100 hover:border-gray-200'}"
-                onclick={() => setDoorType(dc.type)}
-                draggable="true"
-                ondragstart={(e) => { e.dataTransfer?.setData('application/o3d-type', 'door'); e.dataTransfer?.setData('application/o3d-id', dc.type); }}
+                class="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors {isPlacingColumn ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+                onclick={() => onPlaceColumn('round')}
               >
-                <div class="w-9 h-9 rounded-lg bg-amber-50 flex items-center justify-center">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{dc.icon}"/></svg>
+                <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {isPlacingColumn ? 'bg-blue-100' : ''}">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="6"/><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
                 </div>
-                <span class="text-xs font-medium text-gray-600">{dc.name}</span>
-                <span class="text-[10px] text-gray-400">{dc.desc}</span>
+                <div class="text-left"><div class="font-medium text-xs">Round Column</div></div>
               </button>
-            {/each}
-          </div>
-
-          <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Windows</h3>
-          <div class="grid grid-cols-2 gap-2">
-            {#each windowCatalog as wc}
               <button
-                class="flex flex-col items-center gap-1 p-2.5 rounded-lg border-2 transition-colors cursor-grab active:cursor-grabbing {currentTool === 'window' && selectedWindowType === wc.type ? 'border-blue-400 bg-blue-50' : 'border-gray-100 hover:border-gray-200'}"
-                onclick={() => setWindowType(wc.type)}
-                draggable="true"
-                ondragstart={(e) => { e.dataTransfer?.setData('application/o3d-type', 'window'); e.dataTransfer?.setData('application/o3d-id', wc.type); }}
+                class="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors {isPlacingColumn ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+                onclick={() => onPlaceColumn('square')}
               >
-                <div class="w-9 h-9 rounded-lg bg-cyan-50 flex items-center justify-center">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0e7490" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+                <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {isPlacingColumn ? 'bg-blue-100' : ''}">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"/><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
                 </div>
-                <span class="text-xs font-medium text-gray-600">{wc.name}</span>
-                <span class="text-[10px] text-gray-400">{wc.desc}</span>
+                <div class="text-left"><div class="font-medium text-xs">Square Column</div></div>
               </button>
-            {/each}
+            </div>
+          </div>
+        {/if}
+
+        <!-- 6. Room -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => roomOpen = !roomOpen}>
+          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Room</span>
+          <span class="text-gray-400 text-xs">{roomOpen ? '▼' : '▶'}</span>
+        </button>
+        {#if roomOpen}
+          <div class="pb-2">
+            <p class="text-[10px] text-gray-400 px-2 mb-1">Presets</p>
+            <div class="grid grid-cols-2 gap-2 mb-3">
+              {#each roomPresets as preset}
+                <button
+                  class="flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 border-gray-100 hover:border-blue-300 hover:bg-blue-50 transition-colors cursor-grab active:cursor-grabbing"
+                  onclick={() => onPresetClick(preset.id)}
+                  draggable="true"
+                  ondragstart={(e) => { e.dataTransfer?.setData('application/o3d-type', 'room'); e.dataTransfer?.setData('application/o3d-id', preset.id); }}
+                >
+                  <div class="w-12 h-12 rounded-lg bg-gray-50 flex items-center justify-center text-2xl font-mono">{preset.icon}</div>
+                  <span class="text-xs font-medium text-gray-600">{preset.name}</span>
+                </button>
+              {/each}
+            </div>
+            <p class="text-[10px] text-gray-400 px-2 mb-1">Templates</p>
+            <div class="grid grid-cols-2 gap-2">
+              {#each roomTemplates as tmpl}
+                <button
+                  class="flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 border-gray-100 hover:border-green-300 hover:bg-green-50 transition-colors cursor-grab active:cursor-grabbing"
+                  onclick={() => onPresetClick(tmpl.presetId, tmpl.name)}
+                  draggable="true"
+                  ondragstart={(e) => { e.dataTransfer?.setData('application/o3d-type', 'room-template'); e.dataTransfer?.setData('application/o3d-id', tmpl.name); }}
+                >
+                  <div class="w-12 h-12 rounded-lg bg-green-50 flex items-center justify-center text-lg">
+                    {#if tmpl.name === 'Living Room'}🛋️
+                    {:else if tmpl.name === 'Bedroom'}🛏️
+                    {:else if tmpl.name === 'Kitchen'}🍳
+                    {:else if tmpl.name === 'Bathroom'}🛁
+                    {:else if tmpl.name === 'Office'}🖥️
+                    {:else if tmpl.name === 'Dining Room'}🍽️
+                    {:else}🏠
+                    {/if}
+                  </div>
+                  <span class="text-xs font-medium text-gray-600">{tmpl.name}</span>
+                  <span class="text-[10px] text-gray-400">{tmpl.furniture.length} items</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <!-- Annotation -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => annotateOpen = !annotateOpen}>
+          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Annotation</span>
+          <span class="text-gray-400 text-xs">{annotateOpen ? '▼' : '▶'}</span>
+        </button>
+        {#if annotateOpen}
+          <div class="space-y-1 pb-2">
+            <button
+              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'text' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+              onclick={() => setTool('text')}
+            >
+              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'text' ? 'bg-blue-100' : ''}">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="8" y1="20" x2="16" y2="20"/></svg>
+              </div>
+              <div class="text-left">
+                <div class="font-medium">Text Label</div>
+                <div class="text-xs text-gray-400">Add text annotations (T)</div>
+              </div>
+            </button>
+            <button
+              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'annotate' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+              onclick={() => setTool('annotate')}
+            >
+              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'annotate' ? 'bg-blue-100' : ''}">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><line x1="16" y1="5" x2="22" y2="5"/><line x1="19" y1="2" x2="19" y2="8"/><line x1="3" y1="12" x2="12" y2="12"/></svg>
+              </div>
+              <div class="text-left">
+                <div class="font-medium">Dimension</div>
+                <div class="text-xs text-gray-400">Add dimension annotations (N)</div>
+              </div>
+            </button>
+            <button
+              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'measure' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+              onclick={() => setTool('measure')}
+            >
+              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'measure' ? 'bg-blue-100' : ''}">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h5l2-7 4 14 2-7h7"/></svg>
+              </div>
+              <div class="text-left">
+                <div class="font-medium">Measure</div>
+                <div class="text-xs text-gray-400">Measure distances (M)</div>
+              </div>
+            </button>
+          </div>
+        {/if}
+
+        <!-- Import -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => importOpen = !importOpen}>
+          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Import</span>
+          <span class="text-gray-400 text-xs">{importOpen ? '▼' : '▶'}</span>
+        </button>
+        {#if importOpen}
+          <div class="space-y-1 pb-2">
+            <button
+              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors hover:bg-gray-50 text-gray-700"
+              onclick={onImportImage}
+            >
+              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+              </div>
+              <div class="text-left">
+                <div class="font-medium">Import Image</div>
+                <div class="text-xs text-gray-400">Floor plan background</div>
+              </div>
+            </button>
+            <button
+              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors hover:bg-gray-50 text-gray-700"
+              onclick={onImportRoomPlan}
+            >
+              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+              </div>
+              <div class="text-left">
+                <div class="font-medium">Import RoomPlan</div>
+                <div class="text-xs text-gray-400">iOS LiDAR scan (.json/.zip)</div>
+              </div>
+            </button>
           </div>
         {/if}
       </div>
 
-    {:else if activeTab === 'rooms'}
-      <div class="space-y-2">
-        <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Room Presets</h3>
-        <p class="text-xs text-gray-400 mb-3">Click to add a room shape to the canvas</p>
-        <div class="grid grid-cols-2 gap-2">
-          {#each roomPresets as preset}
-            <button
-              class="flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 border-gray-100 hover:border-blue-300 hover:bg-blue-50 transition-colors cursor-grab active:cursor-grabbing"
-              onclick={() => onPresetClick(preset.id)}
-              draggable="true"
-              ondragstart={(e) => { e.dataTransfer?.setData('application/o3d-type', 'room'); e.dataTransfer?.setData('application/o3d-id', preset.id); }}
-            >
-              <div class="w-12 h-12 rounded-lg bg-gray-50 flex items-center justify-center text-2xl font-mono">{preset.icon}</div>
-              <span class="text-xs font-medium text-gray-600">{preset.name}</span>
-            </button>
-          {/each}
-        </div>
-
-        <hr class="my-3 border-gray-200" />
-
-        <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Room Templates</h3>
-        <p class="text-xs text-gray-400 mb-3">Pre-furnished rooms — walls + furniture in one click</p>
-        <div class="grid grid-cols-2 gap-2">
-          {#each roomTemplates as tmpl}
-            <button
-              class="flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 border-gray-100 hover:border-green-300 hover:bg-green-50 transition-colors cursor-grab active:cursor-grabbing"
-              onclick={() => onPresetClick(tmpl.presetId, tmpl.name)}
-              draggable="true"
-              ondragstart={(e) => { e.dataTransfer?.setData('application/o3d-type', 'room-template'); e.dataTransfer?.setData('application/o3d-id', tmpl.name); }}
-            >
-              <div class="w-12 h-12 rounded-lg bg-green-50 flex items-center justify-center text-lg">
-                {#if tmpl.name === 'Living Room'}🛋️
-                {:else if tmpl.name === 'Bedroom'}🛏️
-                {:else if tmpl.name === 'Kitchen'}🍳
-                {:else if tmpl.name === 'Bathroom'}🛁
-                {:else if tmpl.name === 'Office'}🖥️
-                {:else if tmpl.name === 'Dining Room'}🍽️
-                {:else}🏠
-                {/if}
-              </div>
-              <span class="text-xs font-medium text-gray-600">{tmpl.name}</span>
-              <span class="text-[10px] text-gray-400">{tmpl.furniture.length} items</span>
-            </button>
-          {/each}
-        </div>
-      </div>
-
-    {:else if activeTab === 'objects'}
+    {:else if activeTab === 'furniture'}
       <div class="space-y-2">
         <!-- Search with clear button and result count -->
         <div class="relative">
