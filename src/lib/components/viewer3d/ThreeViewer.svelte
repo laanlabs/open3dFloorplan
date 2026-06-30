@@ -167,8 +167,18 @@
   // Cleanup outline helpers and focus state when leaving collaboration mode
   $effect(() => {
     if (!collaborationMode) {
-      if (collabOutlineHelper) { scene?.remove(collabOutlineHelper); collabOutlineHelper = null; }
-      if (collabHoverOutline) { scene?.remove(collabHoverOutline); collabHoverOutline = null; }
+      if (collabOutlineHelper) {
+        collabOutlineHelper.geometry.dispose();
+        (collabOutlineHelper.material as THREE.Material).dispose();
+        scene?.remove(collabOutlineHelper);
+        collabOutlineHelper = null;
+      }
+      if (collabHoverOutline) {
+        collabHoverOutline.geometry.dispose();
+        (collabHoverOutline.material as THREE.Material).dispose();
+        scene?.remove(collabHoverOutline);
+        collabHoverOutline = null;
+      }
       collabHoveredObjectId = null;
       collabSelectedObjectId = null;
       commentInputVisible = false;
@@ -775,26 +785,27 @@
     skyTexture.mapping = THREE.EquirectangularReflectionMapping;
     scene.background = skyTexture;
 
-    // Ground plane — textured concrete with grid overlay
+    // Ground plane — soft grass-green with subtle grid
     const groundSize = 40000;
     const groundGeo = new THREE.PlaneGeometry(groundSize, groundSize);
-    // Generate a subtle concrete texture with grid
     const groundCanvas = document.createElement('canvas');
     groundCanvas.width = 1024; groundCanvas.height = 1024;
     const gctx = groundCanvas.getContext('2d')!;
-    // Base concrete color with noise
-    gctx.fillStyle = '#c8c2b8';
+    // Base soft grass green
+    gctx.fillStyle = '#8aad7a';
     gctx.fillRect(0, 0, 1024, 1024);
-    // Add subtle noise for concrete feel
+    // Subtle grass texture noise
     for (let i = 0; i < 30000; i++) {
       const nx = Math.random() * 1024;
       const ny = Math.random() * 1024;
-      const v = 180 + Math.random() * 30;
-      gctx.fillStyle = `rgba(${v},${v-5},${v-12},0.15)`;
+      const g = 140 + Math.random() * 40;
+      const r = g - 30 - Math.random() * 20;
+      const b = r - 20;
+      gctx.fillStyle = `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},0.12)`;
       gctx.fillRect(nx, ny, 2, 2);
     }
     // Grid lines every 128px (= 500cm real-world at current repeat)
-    gctx.strokeStyle = 'rgba(0,0,0,0.08)';
+    gctx.strokeStyle = 'rgba(0,0,0,0.07)';
     gctx.lineWidth = 1;
     const gridStep = 128;
     for (let x = 0; x <= 1024; x += gridStep) {
@@ -804,7 +815,7 @@
       gctx.beginPath(); gctx.moveTo(0, y); gctx.lineTo(1024, y); gctx.stroke();
     }
     // Thicker lines every 4 grid cells (= 2000cm / 20m)
-    gctx.strokeStyle = 'rgba(0,0,0,0.15)';
+    gctx.strokeStyle = 'rgba(0,0,0,0.12)';
     gctx.lineWidth = 2;
     for (let x = 0; x <= 1024; x += gridStep * 4) {
       gctx.beginPath(); gctx.moveTo(x, 0); gctx.lineTo(x, 1024); gctx.stroke();
@@ -2236,7 +2247,12 @@
   // ─── Collaboration helpers ─────────────────────────────────────────────────
 
   function setCollabOutline(objectId: string | null) {
-    if (collabOutlineHelper) { scene.remove(collabOutlineHelper); collabOutlineHelper = null; }
+    if (collabOutlineHelper) {
+      collabOutlineHelper.geometry.dispose();
+      (collabOutlineHelper.material as THREE.Material).dispose();
+      scene.remove(collabOutlineHelper);
+      collabOutlineHelper = null;
+    }
     if (!objectId) { markSceneDirty(); return; }
 
     scene.traverse((obj: any) => {
@@ -2267,13 +2283,18 @@
   }
 
   function setCollabHover(objectId: string | null) {
-    if (collabHoverOutline) { scene.remove(collabHoverOutline); collabHoverOutline = null; }
+    if (collabHoverOutline) {
+      collabHoverOutline.geometry.dispose();
+      (collabHoverOutline.material as THREE.Material).dispose();
+      scene.remove(collabHoverOutline);
+      collabHoverOutline = null;
+    }
     if (!objectId || objectId === collabSelectedObjectId) { markSceneDirty(); return; }
 
     scene.traverse((obj: any) => {
       if (collabHoverOutline) return;
       if (!(obj as THREE.Mesh).isMesh) return;
-      const id = obj.userData?.furnitureId ?? obj.userData?.wallId ?? obj.uuid;
+      const id = obj.userData?.furnitureId ?? obj.userData?.wallId ?? obj.userData?.doorId ?? obj.userData?.windowId ?? obj.uuid;
       if (id !== objectId) return;
 
       const mesh = obj as THREE.Mesh;
@@ -2319,32 +2340,36 @@
     meshOriginalOpacity.clear();
     scene.traverse((obj: any) => {
       if (!(obj as THREE.Mesh).isMesh) return;
-      const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
-      if (!mat) return;
+      const mesh = obj as THREE.Mesh;
 
-      meshOriginalOpacity.set(obj.uuid, {
-        opacity:           mat.opacity,
-        transparent:       mat.transparent,
-        color:             mat.color.clone(),
-        emissive:          (mat.emissive ?? new THREE.Color(0)).clone(),
-        emissiveIntensity: mat.emissiveIntensity ?? 0,
-        wireframe:         (mat as any).wireframe ?? false,
-      });
-
-      if (targetUUIDs.has(obj.uuid)) {
-        // Highlighted object: swap to corporate coral
-        mat.color.copy(HIGHLIGHT_COLOR);
-        mat.emissive.copy(HIGHLIGHT_EMISSIVE);
-        mat.emissiveIntensity = HIGHLIGHT_EMISSIVE_I;
-      } else if (obj.userData?.wallId) {
-        // Wall meshes: wireframe so room structure stays readable
-        (mat as any).wireframe = true;
-      } else {
-        // Everything else: moderate dim
-        mat.transparent = true;
-        mat.opacity = DIM_OPACITY;
+      const mats = Array.isArray(mesh.material)
+        ? (mesh.material as THREE.MeshStandardMaterial[])
+        : [(mesh.material as THREE.MeshStandardMaterial)];
+      for (const mat of mats) {
+        if (!mat || meshOriginalOpacity.has(mat.uuid)) continue; // skip already-saved shared material
+        meshOriginalOpacity.set(mat.uuid, {
+          opacity:           mat.opacity,
+          transparent:       mat.transparent,
+          color:             mat.color.clone(),
+          emissive:          (mat.emissive ?? new THREE.Color(0)).clone(),
+          emissiveIntensity: mat.emissiveIntensity ?? 0,
+          wireframe:         mat.wireframe,
+        });
+        if (targetUUIDs.has(obj.uuid)) {
+          // Highlighted object: swap to corporate coral
+          mat.color.copy(HIGHLIGHT_COLOR);
+          mat.emissive.copy(HIGHLIGHT_EMISSIVE);
+          mat.emissiveIntensity = HIGHLIGHT_EMISSIVE_I;
+        } else if (obj.userData?.wallId) {
+          // Wall meshes: wireframe so room structure stays readable
+          mat.wireframe = true;
+        } else {
+          // Everything else: moderate dim
+          mat.transparent = true;
+          mat.opacity = DIM_OPACITY;
+        }
+        mat.needsUpdate = true;
       }
-      mat.needsUpdate = true;
     });
 
     // Fly camera toward the highlighted object
@@ -2371,17 +2396,23 @@
     // Restore every mesh to its saved state
     scene.traverse((obj: any) => {
       if (!(obj as THREE.Mesh).isMesh) return;
-      const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
-      if (!mat) return;
-      const saved = meshOriginalOpacity.get(obj.uuid);
-      if (!saved) return;
-      mat.color.copy(saved.color);
-      if (mat.emissive !== undefined) mat.emissive.copy(saved.emissive);
-      mat.emissiveIntensity = saved.emissiveIntensity;
-      mat.opacity           = saved.opacity;
-      mat.transparent       = saved.transparent;
-      (mat as any).wireframe = saved.wireframe;
-      mat.needsUpdate = true;
+      const mesh = obj as THREE.Mesh;
+
+      const mats = Array.isArray(mesh.material)
+        ? (mesh.material as THREE.MeshStandardMaterial[])
+        : [(mesh.material as THREE.MeshStandardMaterial)];
+      for (const mat of mats) {
+        if (!mat) continue;
+        const saved = meshOriginalOpacity.get(mat.uuid);
+        if (!saved) continue;
+        mat.color.copy(saved.color);
+        if (mat.emissive !== undefined) mat.emissive.copy(saved.emissive);
+        mat.emissiveIntensity = saved.emissiveIntensity;
+        mat.opacity           = saved.opacity;
+        mat.transparent       = saved.transparent;
+        mat.wireframe         = saved.wireframe;
+        mat.needsUpdate = true;
+      }
     });
     meshOriginalOpacity.clear();
 
@@ -2394,7 +2425,12 @@
       preFocusTarget = null;
     }
 
-    if (collabHoverOutline) { scene.remove(collabHoverOutline); collabHoverOutline = null; }
+    if (collabHoverOutline) {
+      collabHoverOutline.geometry.dispose();
+      (collabHoverOutline.material as THREE.Material).dispose();
+      scene.remove(collabHoverOutline);
+      collabHoverOutline = null;
+    }
     collabHoveredObjectId = null;
 
     focusMode = false;
@@ -4060,6 +4096,13 @@
         if (cameraPlacementMode) { cameraPlacementMode = false; } else { cameraPlacementMode = true; cameraPlaced = false; editMode = true; if (walkthroughMode) exitWalkthroughMode(); furniturePlacementMode = false; }
       } else if (cmd === 'toggleWalkthrough') {
         toggleWalkthroughMode();
+      } else if (cmd === 'toggleLighting') {
+        lightingPanelOpen = !lightingPanelOpen;
+      } else if (cmd === 'toggleFurniture') {
+        furniturePlacementMode = !furniturePlacementMode;
+        if (!furniturePlacementMode) { removeGhostPreview(); selectedCatalogId = null; furniturePickerOpen = false; } else { furniturePickerOpen = true; materialPickerWall = null; materialPickerPos = null; }
+      } else if (cmd === 'screenshot') {
+        takeScreenshot();
       }
       sceneCommand.set(null);
     });
@@ -4132,38 +4175,18 @@
 </script>
 
 <div bind:this={container} class="w-full h-full relative">
-  <!-- Screenshot shortcut button (scene-mode buttons are now in TopBar Row 2) -->
-  <div class="absolute top-3 right-3 z-40 flex gap-1">
-    <button onclick={takeScreenshot} class="p-1.5 rounded-lg bg-black/60 text-white/80 hover:bg-black/80 transition-colors" title="Save 3D Screenshot">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-    </button>
-  </div>
-
+  <!-- Docked wall-length context panel -->
   {#if dim3DActive && activePlacementType === 'wall' && activeWallSubType !== 'curved'}
-    <DimensionInput
-      x={dim3DScreenX}
-      y={dim3DScreenY}
-      onCommit={onDim3DCommit}
-      onCancel={() => { clearWallDrawingState(); }}
-    />
-  {/if}
-
-  {#if cameraPlacementMode && !cameraPlaced}
-    <div class="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-black/80 text-white px-4 py-2 rounded-lg text-sm backdrop-blur-sm">
-      📷 Click on the floor to place camera position
-    </div>
-  {:else if cameraPlacementMode && cameraPlaced}
-    <div class="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-black/80 text-white px-4 py-2 rounded-lg text-sm backdrop-blur-sm">
-      🎯 Click where the camera should look
-    </div>
-  {:else if activePlacementType === 'wall'}
-    <div class="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-black/80 text-white px-4 py-2 rounded-lg text-sm backdrop-blur-sm">
-      {#if activeWallSubType === 'curved'}
-        {curvedWallPhase === 0 ? 'Click to set wall start' : curvedWallPhase === 1 ? 'Click to set wall end' : 'Click to set curve control point'}
-      {:else}
-        {wallDrawStart ? 'Click to place wall end — double-click to finish' : 'Click to start drawing a wall'}
-      {/if}
-      &nbsp;· ESC to cancel
+    <div class="absolute right-4 top-1/2 -translate-y-1/2 z-40 w-52 bg-slate-900/95 rounded-xl border border-white/10 shadow-xl backdrop-blur-sm p-3 flex flex-col gap-2">
+      <span class="text-white/40 text-[10px] uppercase tracking-wider">Wall Length</span>
+      <DimensionInput
+        x={dim3DScreenX}
+        y={dim3DScreenY}
+        onCommit={onDim3DCommit}
+        onCancel={() => { clearWallDrawingState(); }}
+        docked={true}
+      />
+      <span class="text-white/25 text-[10px]">Enter to confirm · Esc to cancel</span>
     </div>
   {/if}
 
@@ -4509,46 +4532,40 @@
     {/if}
   {/if}
 
-  {#if editMode && !walkthroughMode && !collaborationMode}
-    <div class="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-10">
-      <div class="bg-blue-600/90 text-white text-sm px-4 py-2 rounded-lg backdrop-blur-sm flex items-center gap-2">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-        </svg>
-        {#if activePlacementType === 'furniture' || furniturePlacementMode}
-          {#if placementPhase === 1}🪑 Move to rotate — click or Enter to confirm • ESC to reposition{:else}🪑 Click floor to place {selectedCatalogId ? (getCatalogItem(selectedCatalogId)?.name ?? 'furniture') : 'furniture'} • ESC to cancel{/if}
+  <!-- Unified hint bar — single bottom-center pill covering all tool states -->
+  {#if cameraPlacementMode || (editMode && !walkthroughMode && !collaborationMode)}
+    <div class="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
+      <div class="bg-slate-900/85 text-white text-sm px-4 py-2 rounded-full backdrop-blur-sm">
+        {#if cameraPlacementMode && !cameraPlaced}
+          Click on the floor to place camera position
+        {:else if cameraPlacementMode && cameraPlaced}
+          Click where the camera should look
+        {:else if activePlacementType === 'wall'}
+          {#if activeWallSubType === 'curved'}
+            {curvedWallPhase === 0 ? 'Click to set wall start' : curvedWallPhase === 1 ? 'Click to set wall end' : 'Click to set curve control point'} · ESC to cancel
+          {:else}
+            {wallDrawStart ? 'Click to place wall end — double-click to finish' : 'Click to start drawing a wall'} · ESC to cancel
+          {/if}
+        {:else if activePlacementType === 'furniture' || furniturePlacementMode}
+          {#if placementPhase === 1}Move to rotate — click or Enter to confirm · ESC to reposition{:else}Click floor to place {selectedCatalogId ? (getCatalogItem(selectedCatalogId)?.name ?? 'furniture') : 'furniture'} · ESC to cancel{/if}
         {:else if activePlacementType === 'stair'}
-          {#if placementPhase === 1}🪜 Move to rotate stair — click or Enter to confirm • ESC to reposition{:else}🪜 Click floor to place stair • ESC to cancel{/if}
+          {#if placementPhase === 1}Move to rotate stair — click or Enter to confirm · ESC to reposition{:else}Click floor to place stair · ESC to cancel{/if}
         {:else if activePlacementType === 'column'}
-          {#if placementPhase === 1}🏛️ Move to rotate {activeColumnShape} column — click or Enter to confirm • ESC to reposition{:else}🏛️ Click floor to place {activeColumnShape} column • ESC to cancel{/if}
+          {#if placementPhase === 1}Move to rotate {activeColumnShape} column — click or Enter to confirm · ESC to reposition{:else}Click floor to place {activeColumnShape} column · ESC to cancel{/if}
         {:else if activePlacementType === 'door'}
-          🚪 Hover over a wall and click to place door • ESC to cancel
+          Hover over a wall and click to place door · ESC to cancel
         {:else if activePlacementType === 'window'}
-          🪟 Hover over a wall and click to place window • ESC to cancel
+          Hover over a wall and click to place window · ESC to cancel
         {:else if activePlacementType === 'room'}
-          {#if placementPhase === 1}🏠 Move to rotate room — click or Enter to confirm • ESC to reposition{:else}🏠 Click floor to place room • ESC to cancel{/if}
+          {#if placementPhase === 1}Move to rotate room — click or Enter to confirm · ESC to reposition{:else}Click floor to place room · ESC to cancel{/if}
         {:else}
-          🪣 Click walls to paint • R to rotate selected • Del to delete • ESC to exit
+          Click walls to paint · R to rotate selected · Del to delete · ESC to exit
         {/if}
       </div>
     </div>
+  {/if}
 
-    <!-- Furniture Placement Toggle -->
-    <button
-      onclick={() => { furniturePlacementMode = !furniturePlacementMode; if (!furniturePlacementMode) { removeGhostPreview(); selectedCatalogId = null; furniturePickerOpen = false; } else { furniturePickerOpen = true; materialPickerWall = null; materialPickerPos = null; } }}
-      class="absolute top-16 right-28 z-50 p-2 rounded-lg transition-colors {furniturePlacementMode ? 'bg-green-600 text-white ring-2 ring-green-300' : 'bg-black/70 text-white hover:bg-black/80'}"
-      title={furniturePlacementMode ? 'Exit Furniture Placement' : 'Place Furniture'}
-      aria-label={furniturePlacementMode ? 'Exit Furniture Placement' : 'Place Furniture'}
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="3" y="12" width="18" height="8" rx="1"/>
-        <path d="M5 12V8a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v4"/>
-        <line x1="5" y1="20" x2="5" y2="22"/>
-        <line x1="19" y1="20" x2="19" y2="22"/>
-      </svg>
-    </button>
-
+  {#if editMode && !walkthroughMode && !collaborationMode}
     <!-- Furniture Picker Panel -->
     {#if furniturePlacementMode && furniturePickerOpen}
       <div class="absolute top-4 left-4 z-50 bg-black/85 text-white rounded-lg backdrop-blur-sm w-56 max-h-[70vh] flex flex-col overflow-hidden select-none">
@@ -4582,27 +4599,9 @@
     {/if}
   {/if}
 
-  <!-- MaterialPicker removed — wall materials editable via Properties panel -->
-
-  <!-- Lighting Controls Toggle Button -->
-  <button
-    onclick={() => { lightingPanelOpen = !lightingPanelOpen; }}
-    class="absolute bottom-4 left-4 z-50 p-2 rounded-lg transition-colors {lightingPanelOpen ? 'bg-amber-500 text-white ring-2 ring-amber-300' : 'bg-black/70 text-white hover:bg-black/80'}"
-    title="Lighting Controls"
-    aria-label="Lighting Controls"
-  >
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <circle cx="12" cy="12" r="5"/>
-      <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
-      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-      <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
-      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-    </svg>
-  </button>
-
   <!-- Lighting Controls Panel -->
   {#if lightingPanelOpen}
-    <div class="absolute bottom-14 left-4 z-50 bg-black/80 text-white text-xs rounded-lg backdrop-blur-sm p-3 space-y-3 min-w-[220px] select-none">
+    <div class="absolute bottom-4 left-4 z-50 bg-black/80 text-white text-xs rounded-lg backdrop-blur-sm p-3 space-y-3 min-w-[220px] select-none">
       <div class="font-semibold text-white/90 text-sm flex items-center gap-1.5">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/></svg>
         Lighting Controls
