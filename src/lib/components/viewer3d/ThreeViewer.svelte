@@ -92,10 +92,11 @@
   let curvedWallStart: { x: number; z: number } | null = null;
   let curvedWallEnd: { x: number; z: number } | null = null;
   let curvedWallPhase = $state<0 | 1 | 2>(0);
-  // 3D DimensionInput overlay — shown after first wall click
+  // 3D wall-length panel — shown after first wall click
   let dim3DActive = $state(false);
   let dim3DScreenX = $state(0);
   let dim3DScreenY = $state(0);
+  let dim3DValue = $state(''); // global keystroke buffer while wall tool is active
   let lastFloorHitPos = { x: 0, z: 0 }; // updated every mousemove in wall mode
 
   // ── Resize handle state ─────────────────────────────────────────────────────
@@ -1568,6 +1569,8 @@
         const hoveredId = hHit
           ? (hHit.object.userData.furnitureId
               ?? hHit.object.userData.wallId
+              ?? hHit.object.userData.doorId
+              ?? hHit.object.userData.windowId
               ?? hHit.object.uuid)
           : null;
         if (hoveredId !== collabHoveredObjectId) {
@@ -1930,6 +1933,7 @@
     curvedWallEnd = null;
     curvedWallPhase = 0;
     dim3DActive = false;
+    dim3DValue = '';
     removeWallGhost();
   }
 
@@ -3465,6 +3469,26 @@
   }
 
   function onKeyDown(event: KeyboardEvent) {
+    // Wall-length digit buffer — intercept when a wall segment is in progress
+    if (dim3DActive && activePlacementType === 'wall' && !walkthroughMode) {
+      if (event.code === 'Backspace') {
+        event.preventDefault();
+        dim3DValue = dim3DValue.slice(0, -1);
+        return;
+      }
+      if (event.code === 'Enter') {
+        const mm = parseFloat(dim3DValue);
+        if (!isNaN(mm) && mm > 0) { onDim3DCommit(mm); dim3DValue = ''; }
+        return;
+      }
+      const digit = event.key;
+      if (/^[0-9.]$/.test(digit)) {
+        event.preventDefault();
+        dim3DValue += digit;
+        return;
+      }
+      // Escape falls through to the existing handler below
+    }
     // Delete/Backspace — remove selected furniture in edit mode (full access only)
     if ((event.code === 'Delete' || event.code === 'Backspace') && editMode && !walkthroughMode && selectedFurnitureId && canEdit) {
       removeFurniture(selectedFurnitureId);
@@ -4175,18 +4199,17 @@
 </script>
 
 <div bind:this={container} class="w-full h-full relative">
-  <!-- Docked wall-length context panel -->
+  <!-- Wall-length panel — fixed top-right, driven by global keystroke buffer -->
   {#if dim3DActive && activePlacementType === 'wall' && activeWallSubType !== 'curved'}
-    <div class="absolute right-4 top-1/2 -translate-y-1/2 z-40 w-52 bg-slate-900/95 rounded-xl border border-white/10 shadow-xl backdrop-blur-sm p-3 flex flex-col gap-2">
+    <div class="fixed z-[150] w-52 bg-slate-900/95 rounded-xl border border-white/10 shadow-xl backdrop-blur-sm p-3 flex flex-col gap-2" style="top: 80px; right: 24px;">
       <span class="text-white/40 text-[10px] uppercase tracking-wider">Wall Length</span>
-      <DimensionInput
-        x={dim3DScreenX}
-        y={dim3DScreenY}
-        onCommit={onDim3DCommit}
-        onCancel={() => { clearWallDrawingState(); }}
-        docked={true}
-      />
-      <span class="text-white/25 text-[10px]">Enter to confirm · Esc to cancel</span>
+      <div class="flex items-center gap-1.5 bg-white/5 rounded px-2 py-1.5 min-h-[32px]">
+        <span class="flex-1 text-sm font-mono {dim3DValue ? 'text-white' : 'text-white/30'}">
+          {dim3DValue || 'length (mm)'}
+        </span>
+        <span class="text-white/40 text-xs">mm</span>
+      </div>
+      <span class="text-white/25 text-[10px]">Type length · Enter to confirm · Esc to cancel</span>
     </div>
   {/if}
 
