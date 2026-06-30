@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup } from '$lib/models/types';
+import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup, StairType, XRef, XRefDxf, XRefNative, DrivenAnnotation, WallDetailAttachment, DetailLayer } from '$lib/models/types';
 
 
 function uid(): string {
@@ -33,13 +33,25 @@ export const activeFloor = derived(currentProject, ($p) => {
 export type Tool = 'select' | 'wall' | 'door' | 'window' | 'furniture' | 'text';
 export const selectedTool = writable<Tool>('select');
 export const snapEnabled = writable<boolean>(true);
+export const autoMergeWalls = writable<boolean>(false);
+export const wallCutoffEnabled = writable<boolean>(false);
+export const xrefSyncTrigger = writable<number>(0);
+/** Scene-mode toggles driven by TopBar Row 2 — ThreeViewer subscribes and reacts */
+export const showAllFloorsStore = writable<boolean>(false);
+export const wallTransparentStore = writable<boolean>(false);
+/** One-shot commands: set to a value to trigger an action in ThreeViewer, which resets to null */
+export const sceneCommand = writable<'toggleCamera' | 'toggleWalkthrough' | 'toggleLighting' | 'toggleFurniture' | 'screenshot' | null>(null);
+/** Active wall paint: when set, clicking a wall applies this color/texture to the chosen face */
+export const wallPaintColor = writable<string | null>(null);
+export const wallPaintTexture = writable<string | null>(null);
+export const wallPaintFace = writable<'interior' | 'exterior'>('interior');
 /** When true, left-click drag pans the canvas instead of selecting */
 export const panMode = writable<boolean>(false);
 export const showFurnitureStore = writable<boolean>(true);
 export const selectedElementId = writable<string | null>(null);
 /** Multi-select: set of element IDs currently selected (used alongside selectedElementId for marquee/shift-click) */
 export const selectedElementIds = writable<Set<string>>(new Set());
-export const viewMode = writable<'2d' | '3d' | 'collab'>('3d');
+export const viewMode = writable<'2d' | '3d' | 'collab' | 'sheets'>('3d');
 
 // Undo / Redo
 interface UndoEntry {
@@ -278,11 +290,11 @@ export function removeFurniture(id: string) {
 }
 
 // Stairs
-export function addStair(position: Point): string {
+export function addStair(position: Point, stairType: StairType = 'straight'): string {
   const id = uid();
   mutate((f) => {
     if (!f.stairs) f.stairs = [];
-    f.stairs.push({ id, position, rotation: 0, width: 100, depth: 300, riserCount: 14, direction: 'up', stairType: 'straight' });
+    f.stairs.push({ id, position, rotation: 0, width: 100, depth: 300, riserCount: 14, direction: 'up', stairType });
   }, 'Added stair');
   return id;
 }
@@ -372,10 +384,46 @@ export const placingColumnShape = writable<'round' | 'square'>('round');
 
 /** Tool for placing stairs */
 export const placingStair = writable<boolean>(false);
+export const placingStairType = writable<StairType>('straight');
 
 /** Scale calibration mode */
 export const calibrationMode = writable<boolean>(false);
 export const calibrationPoints = writable<Point[]>([]);
+
+/** Wall drawing sub-type and height (for 3D wall placement) */
+export type WallSubType = 'standard' | 'half' | 'curved';
+export const placingWallSubType = writable<WallSubType>('standard');
+export const placingWallHeight = writable<number>(280);
+
+/** Move a door without creating an undo snapshot (used during drag; call beginDrag() first) */
+export function moveDoor(id: string, position: number) {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find((f) => f.id === p.activeFloorId);
+  if (!floor) return;
+  const d = floor.doors.find((d) => d.id === id);
+  if (d) { d.position = position; p.updatedAt = new Date(); currentProject.set({ ...p }); }
+}
+
+/** Move a window without creating an undo snapshot (used during drag; call beginDrag() first) */
+export function moveWindow(id: string, position: number) {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find((f) => f.id === p.activeFloorId);
+  if (!floor) return;
+  const w = floor.windows.find((w) => w.id === id);
+  if (w) { w.position = position; p.updatedAt = new Date(); currentProject.set({ ...p }); }
+}
+
+/** Resize furniture without creating an undo snapshot (used during drag; call beginDrag() first) */
+export function resizeFurniture(id: string, updates: Partial<FurnitureItem>) {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find((f) => f.id === p.activeFloorId);
+  if (!floor) return;
+  const fi = floor.furniture.find((fi) => fi.id === id);
+  if (fi) { Object.assign(fi, updates); p.updatedAt = new Date(); currentProject.set({ ...p }); }
+}
 
 export function removeElement(id: string) {
   mutate((f) => {
@@ -542,6 +590,10 @@ export const placingWindowType = writable<import('$lib/models/types').Window['ty
 export const placingRoomPresetId = writable<string | null>(null);
 /** Room template name for the current 3D room placement (null = use preset default) */
 export const placingRoomTemplateName = writable<string | null>(null);
+/** ID of ConstructionDetailDef being placed (null = not placing) */
+export const placingDetailId = writable<string | null>(null);
+/** ID of EntourageDef (builtin) or CustomEntourageDef being placed (null = not placing) */
+export const placingEntourageDefId = writable<string | null>(null);
 
 /** Duplicate a door onto the same wall */
 export function duplicateDoor(id: string): string | null {
@@ -736,6 +788,173 @@ export function updateAnnotation(id: string, updates: Partial<{ x1: number; y1: 
   });
 }
 
+// --- Driven Annotations (bidirectional parametric dimensions) ---
+
+export function addDrivenAnnotation(
+  x1: number, y1: number, x2: number, y2: number,
+  anchorWallId: string, drivenWallId: string, axis: 'x' | 'y'
+): string {
+  const id = uid();
+  mutate(f => {
+    if (!f.drivenAnnotations) f.drivenAnnotations = [];
+    f.drivenAnnotations.push({ id, x1, y1, x2, y2, offset: 40, driven: true, anchorWallId, drivenWallId, axis });
+  }, 'Add driven dimension');
+  return id;
+}
+
+export function removeDrivenAnnotation(id: string) {
+  mutate(f => {
+    if (!f.drivenAnnotations) return;
+    f.drivenAnnotations = f.drivenAnnotations.filter(a => a.id !== id);
+  });
+}
+
+function _wallMidpoint(w: Wall): Point {
+  return { x: (w.start.x + w.end.x) / 2, y: (w.start.y + w.end.y) / 2 };
+}
+
+/** Re-derive annotation endpoints from the current wall positions (call after any wall move). */
+export function syncDrivenAnnotationsForWall(wallId: string) {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find(f => f.id === p.activeFloorId);
+  if (!floor || !floor.drivenAnnotations?.length) return;
+
+  let changed = false;
+  for (const ann of floor.drivenAnnotations) {
+    if (ann.anchorWallId !== wallId && ann.drivenWallId !== wallId) continue;
+    const anchor = floor.walls.find(w => w.id === ann.anchorWallId);
+    const driven = floor.walls.find(w => w.id === ann.drivenWallId);
+    if (!anchor || !driven) continue;
+
+    const am = _wallMidpoint(anchor);
+    const dm = _wallMidpoint(driven);
+
+    if (ann.axis === 'x') {
+      const avgY = (am.y + dm.y) / 2;
+      ann.x1 = am.x; ann.y1 = avgY;
+      ann.x2 = dm.x; ann.y2 = avgY;
+    } else {
+      const avgX = (am.x + dm.x) / 2;
+      ann.x1 = avgX; ann.y1 = am.y;
+      ann.x2 = avgX; ann.y2 = dm.y;
+    }
+    changed = true;
+  }
+
+  if (changed) {
+    p.updatedAt = new Date();
+    currentProject.set({ ...p });
+  }
+}
+
+/**
+ * Move the drivenWall so the dimension matches `newLengthCm`, then sync annotation coords.
+ * Groups the wall move + annotation sync into a single undo entry.
+ */
+export function resolveDrivenDimension(id: string, newLengthCm: number) {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find(f => f.id === p.activeFloorId);
+  if (!floor?.drivenAnnotations) return;
+
+  const ann = floor.drivenAnnotations.find(a => a.id === id);
+  if (!ann) return;
+
+  const anchor = floor.walls.find(w => w.id === ann.anchorWallId);
+  const driven = floor.walls.find(w => w.id === ann.drivenWallId);
+  if (!anchor || !driven) return;
+
+  const currentLength = Math.hypot(ann.x2 - ann.x1, ann.y2 - ann.y1);
+  if (Math.abs(newLengthCm - currentLength) < 0.5) return; // no-op
+
+  snapshot('Resize via driven dimension');
+
+  if (ann.axis === 'x') {
+    const dir = ann.x2 > ann.x1 ? 1 : -1;
+    moveWallParallel(ann.drivenWallId, (newLengthCm - currentLength) * dir, 0);
+  } else {
+    const dir = ann.y2 > ann.y1 ? 1 : -1;
+    moveWallParallel(ann.drivenWallId, 0, (newLengthCm - currentLength) * dir);
+  }
+
+  syncDrivenAnnotationsForWall(ann.drivenWallId);
+}
+
+// --- Wall Detail Attachments ---
+
+export function addWallDetailAttachment(wallId: string, detailId: string, position: number, layers: DetailLayer[]): string {
+  const id = uid();
+  mutate(f => {
+    if (!f.wallDetailAttachments) f.wallDetailAttachments = [];
+    const calloutNumber = (f.wallDetailAttachments.length) + 1;
+    f.wallDetailAttachments.push({ id, wallId, detailId, calloutNumber, position, layers: layers.map(l => ({ ...l })) });
+  }, 'Add detail callout');
+  return id;
+}
+
+export function removeWallDetailAttachment(id: string) {
+  mutate(f => {
+    if (!f.wallDetailAttachments) return;
+    f.wallDetailAttachments = f.wallDetailAttachments.filter(a => a.id !== id);
+    // Re-number callouts sequentially after removal
+    f.wallDetailAttachments.forEach((a, i) => { a.calloutNumber = i + 1; });
+  });
+}
+
+export function addEntourageItem(item: import('$lib/models/types').EntourageItem): void {
+  mutate((f) => {
+    if (!f.entourageItems) f.entourageItems = [];
+    f.entourageItems.push(item);
+  }, 'Added entourage');
+}
+
+export function updateEntourageItem(
+  itemId: string,
+  patch: Partial<import('$lib/models/types').EntourageItem>
+): void {
+  mutate((f) => {
+    if (!f.entourageItems) return;
+    const idx = f.entourageItems.findIndex((e) => e.id === itemId);
+    if (idx === -1) return;
+    f.entourageItems[idx] = { ...f.entourageItems[idx], ...patch };
+  }, 'Updated entourage');
+}
+
+export function removeEntourageItem(itemId: string): void {
+  mutate((f) => {
+    if (!f.entourageItems) return;
+    f.entourageItems = f.entourageItems.filter((e) => e.id !== itemId);
+  }, 'Removed entourage');
+}
+
+export function addCustomEntourage(def: import('$lib/models/types').CustomEntourageDef): void {
+  const p = get(currentProject);
+  if (!p) return;
+  snapshot('Added custom entourage');
+  if (!p.customEntourage) p.customEntourage = [];
+  p.customEntourage.push(def);
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+}
+
+export function removeCustomEntourage(defId: string): void {
+  const p = get(currentProject);
+  if (!p) return;
+  snapshot('Removed custom entourage');
+  p.customEntourage = (p.customEntourage ?? []).filter((d) => d.id !== defId);
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+}
+
+export function updateDetailAttachmentLayers(id: string, layers: DetailLayer[]) {
+  mutate(f => {
+    if (!f.wallDetailAttachments) return;
+    const a = f.wallDetailAttachments.find(a => a.id === id);
+    if (a) a.layers = layers.map(l => ({ ...l }));
+  });
+}
+
 // --- Text Annotations ---
 export function addTextAnnotation(x: number, y: number, text: string, fontSize = 16, color = '#1e293b', rotation = 0): string {
   const id = uid();
@@ -835,4 +1054,68 @@ export const canvasZoom = writable<number>(1);
 // Camera position stores for 2D canvas — used to compute viewport center
 export const canvasCamX = writable<number>(0);
 export const canvasCamY = writable<number>(0);
+
+// Camera view preset store — ThreeViewer subscribes and animates to the requested view
+export const cameraView = writable<'top-down' | 'front' | 'side' | 'isometric' | 'exploded' | 'perspective' | null>(null);
+
+// Array duplicate: clones item `count` times offset by `dx/dy` cm each step
+export function arrayDuplicateFurniture(id: string, count: number, dx: number, dy: number): void {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find(f => f.id === p.activeFloorId);
+  if (!floor) return;
+  const fi = floor.furniture.find(fi => fi.id === id);
+  if (!fi || count < 1) return;
+  beginUndoGroup();
+  for (let i = 1; i <= count; i++) {
+    const newId = uid();
+    mutate(f => {
+      f.furniture.push({ ...fi, id: newId, position: { x: fi.position.x + dx * i, y: fi.position.y + dy * i } });
+    });
+  }
+  endUndoGroup(`Array copy ×${count}`);
+}
+
+// ─── XREF CRUD ────────────────────────────────────────────────────────────────
+
+export function addXRef(xref: XRef): void {
+  mutate(f => { (f.xrefs ??= []).push(xref); }, 'Added XREF');
+}
+
+export function removeXRef(xrefId: string): void {
+  mutate(f => { if (f.xrefs) f.xrefs = f.xrefs.filter(x => x.id !== xrefId); }, 'Removed XREF');
+}
+
+export function updateXRef(xrefId: string, patch: Partial<XRef>): void {
+  mutate(f => {
+    if (!f.xrefs) return;
+    const idx = f.xrefs.findIndex(x => x.id === xrefId);
+    if (idx !== -1) f.xrefs[idx] = { ...f.xrefs[idx], ...patch } as XRef;
+  }, 'Updated XREF');
+}
+
+export function syncXRefs(): void {
+  xrefSyncTrigger.update(n => n + 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Divide duplicate: places `count` copies evenly across totalDx/totalDy span (including original at index 0)
+export function divideDuplicateFurniture(id: string, count: number, totalDx: number, totalDy: number): void {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find(f => f.id === p.activeFloorId);
+  if (!floor) return;
+  const fi = floor.furniture.find(fi => fi.id === id);
+  if (!fi || count < 2) return;
+  const step = 1 / (count - 1);
+  beginUndoGroup();
+  for (let i = 1; i < count; i++) {
+    const newId = uid();
+    mutate(f => {
+      f.furniture.push({ ...fi, id: newId, position: { x: fi.position.x + totalDx * step * i, y: fi.position.y + totalDy * step * i } });
+    });
+  }
+  endUndoGroup(`Divide copy ×${count}`);
+}
 

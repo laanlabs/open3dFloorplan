@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { activeFloor, selectedTool, selectedElementId, selectedElementIds, selectedRoomId, addWall, addDoor, addWindow, updateWall, moveWallEndpoint, updateDoor, updateWindow, addFurniture, moveFurniture, commitFurnitureMove, rotateFurniture, setFurnitureRotation, scaleFurniture, removeElement, placingFurnitureId, placingRotation, placingDoorType, placingWindowType, detectedRoomsStore, duplicateDoor, duplicateWindow, duplicateFurniture, duplicateWall, moveWallParallel, splitWall, snapEnabled, placingStair, addStair, moveStair, updateStair, placingColumn, placingColumnShape, addColumn, moveColumn, updateColumn, calibrationMode, calibrationPoints, updateBackgroundImage, setBackgroundImage, canvasZoom, canvasCamX, canvasCamY, panMode, showFurnitureStore, addGuide, moveGuide, removeGuide, beginUndoGroup, endUndoGroup, layerVisibility, updateRoom, addMeasurement, removeMeasurement, addAnnotation, removeAnnotation, updateAnnotation, addTextAnnotation, removeTextAnnotation, updateTextAnnotation, moveTextAnnotation, toggleFurnitureLock, createGroup, ungroupElements, findGroupForElement } from '$lib/stores/project';
-  import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, GuideLine, Measurement, Annotation, TextAnnotation } from '$lib/models/types';
+  import { activeFloor, selectedTool, selectedElementId, selectedElementIds, selectedRoomId, addWall, addDoor, addWindow, updateWall, moveWallEndpoint, updateDoor, updateWindow, addFurniture, moveFurniture, commitFurnitureMove, rotateFurniture, setFurnitureRotation, scaleFurniture, removeElement, placingFurnitureId, placingRotation, placingDoorType, placingWindowType, detectedRoomsStore, duplicateDoor, duplicateWindow, duplicateFurniture, duplicateWall, moveWallParallel, splitWall, snapEnabled, placingStair, addStair, moveStair, updateStair, placingColumn, placingColumnShape, addColumn, moveColumn, updateColumn, calibrationMode, calibrationPoints, updateBackgroundImage, setBackgroundImage, canvasZoom, canvasCamX, canvasCamY, panMode, showFurnitureStore, addGuide, moveGuide, removeGuide, beginUndoGroup, endUndoGroup, layerVisibility, updateRoom, addMeasurement, removeMeasurement, addAnnotation, removeAnnotation, updateAnnotation, addTextAnnotation, removeTextAnnotation, updateTextAnnotation, moveTextAnnotation, toggleFurnitureLock, createGroup, ungroupElements, findGroupForElement, addDrivenAnnotation, removeDrivenAnnotation, resolveDrivenDimension, syncDrivenAnnotationsForWall, placingDetailId, addWallDetailAttachment, removeWallDetailAttachment,
+  placingEntourageDefId, addEntourageItem, updateEntourageItem, removeEntourageItem } from '$lib/stores/project';
+  import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, GuideLine, Measurement, Annotation, TextAnnotation, DrivenAnnotation } from '$lib/models/types';
   import type { Floor, Room } from '$lib/models/types';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
   import { getMaterial } from '$lib/utils/materials';
@@ -14,8 +15,16 @@
   import { projectSettings, formatLength, formatArea } from '$lib/stores/settings';
   import type { ProjectSettings } from '$lib/stores/settings';
   import type { CanvasState } from '$lib/utils/canvasInteraction';
-  import { drawWall as _drawWall, drawDoorOnWall as _drawDoorOnWall, drawWindowOnWall as _drawWindowOnWall, drawDoorDistanceDimensions as _drawDoorDistanceDimensions, drawWindowDistanceDimensions as _drawWindowDistanceDimensions, drawFurnitureItem, drawStair as _drawStair, drawColumn as _drawColumn, drawGuides as _drawGuides, drawPersistedMeasurements as _drawPersistedMeasurements, drawTextAnnotations as _drawTextAnnotations, drawAnnotation as _drawAnnotation, drawAnnotations as _drawAnnotations, drawRooms as _drawRooms, drawWallJoints as _drawWallJoints, drawSnapPoints as _drawSnapPoints, drawMinimap as _drawMinimap } from '$lib/utils/canvasRenderer';
+  import { wallSegmentsOverlap, collectObjectSnapPoints, MAGNETIC_SNAP } from '$lib/utils/canvasInteraction';
+  import type { ObjSnapPoint, SnapType } from '$lib/utils/canvasInteraction';
+  import { autoMergeWalls, wallPaintColor, wallPaintTexture, wallPaintFace } from '$lib/stores/project';
+  import WallMergeDialog from '$lib/components/editor/WallMergeDialog.svelte';
+  import { transformXRefPoint } from '$lib/utils/dxfParser';
+  import type { XRefDxf } from '$lib/models/types';
+  import { drawWall as _drawWall, drawDoorOnWall as _drawDoorOnWall, drawWindowOnWall as _drawWindowOnWall, drawDoorDistanceDimensions as _drawDoorDistanceDimensions, drawWindowDistanceDimensions as _drawWindowDistanceDimensions, drawFurnitureItem, drawStair as _drawStair, drawColumn as _drawColumn, drawGuides as _drawGuides, drawPersistedMeasurements as _drawPersistedMeasurements, drawTextAnnotations as _drawTextAnnotations, drawAnnotation as _drawAnnotation, drawAnnotations as _drawAnnotations, drawDrivenAnnotation as _drawDrivenAnnotation, drawDrivenAnnotations as _drawDrivenAnnotations, drawDetailCallouts as _drawDetailCallouts, drawRooms as _drawRooms, drawWallJoints as _drawWallJoints, drawSnapPoints as _drawSnapPoints, drawMinimap as _drawMinimap, drawSnapIndicator as _drawSnapIndicator, drawDragTooltip as _drawDragTooltip, drawApproachingCandidate as _drawApproachingCandidate, drawAxisRail as _drawAxisRail, drawGripDots as _drawGripDots } from '$lib/utils/canvasRenderer';
+  import { detailCatalog } from '$lib/utils/detailCatalog';
   import { pointInPolygon, positionOnWall, findWallAt as _findWallAt, findHandleAt as _findHandleAt, findFurnitureAt as _findFurnitureAt, findColumnAt as _findColumnAt, findStairAt as _findStairAt, findDoorAt as _findDoorAt, findWindowAt as _findWindowAt, findRoomAt as _findRoomAt, hitTestMeasurement as _hitTestMeasurement, hitTestAnnotation as _hitTestAnnotation, hitTestTextAnnotation as _hitTestTextAnnotation } from '$lib/utils/hitTesting';
+  import DimensionInput from '$lib/components/ui/DimensionInput.svelte';
 
   let canvas: HTMLCanvasElement;
   let ctx: CanvasRenderingContext2D;
@@ -41,6 +50,23 @@
   let wallStart: Point | null = $state(null);
   let wallSequenceFirst: Point | null = $state(null);
   let mousePos: Point = $state({ x: 0, y: 0 });
+  let cursorScreenX = $state(0);
+  let cursorScreenY = $state(0);
+
+  // Wall paint mode — reactive locals tracked from stores
+  let currentPaintColor: string | null = null;
+  let currentPaintTexture: string | null = null;
+  let currentPaintFace: 'interior' | 'exterior' = 'interior';
+  wallPaintColor.subscribe(v => { currentPaintColor = v; });
+  wallPaintTexture.subscribe(v => { currentPaintTexture = v; });
+  wallPaintFace.subscribe(v => { currentPaintFace = v; });
+
+  // Wall merge dialog state
+  let wallMergeDialogOpen = $state(false);
+  // Pending wall endpoints held while merge dialog is shown
+  let pendingWallA: Point | null = null;
+  let pendingWallB: Point | null = null;
+  let pendingWallNext: Point | null = null; // wallStart to advance to after merge/keep
 
   // Inline room name editing
   let editingRoomId: string | null = $state(null);
@@ -62,6 +88,16 @@
   let draggingDoorId: string | null = $state(null);
   let draggingWindowId: string | null = $state(null);
 
+  // Precision drag state (object snap + grip indicators + tooltip + axis rail)
+  let objectSnapCandidates: ObjSnapPoint[] = [];
+  let snapResultType: SnapType | null = $state(null);
+  let snapResultPoint: Point | null = $state(null);
+  let approachingCandidate: ObjSnapPoint | null = $state(null);
+  let dragStartWorld: Point = { x: 0, y: 0 }; // furniture center at drag start (for Δ tooltip)
+  // Shift-constrain axis lock
+  let constrainAxis: 'x' | 'y' | null = $state(null);
+  let constrainBaseCenter: Point = { x: 0, y: 0 }; // center position when Shift was first pressed
+
   // Guide lines
   let selectedGuideId: string | null = $state(null);
   let draggingGuideId: string | null = $state(null);
@@ -76,6 +112,17 @@
   let annotating = $state(false);
   let annotationStart: Point | null = $state(null);
   let selectedAnnotationId: string | null = $state(null);
+
+  // Driven annotation (parametric dimension) state
+  let selectedDrivenAnnotationId: string | null = $state(null);
+  let editingDrivenAnnotationId: string | null = $state(null);
+  let editingDrivenAnnotationPos: { x: number; y: number } = $state({ x: 0, y: 0 });
+  let editingDrivenAnnotationValue: string = $state('');
+
+  // Detail callout placement state
+  let currentPlacingDetailId: string | null = $state(null);
+  placingDetailId.subscribe(id => { currentPlacingDetailId = id; });
+  let selectedCalloutId: string | null = $state(null);
 
   // Text annotation tool
   let textAnnotationMode = $state(false);
@@ -123,7 +170,6 @@
 
   const GRID = 20;
   const SNAP = 10;
-  const MAGNETIC_SNAP = 15;
   const WALL_SNAP_DIST = 30; // cm — distance threshold to snap furniture to wall
 
   // Store subscriptions
@@ -362,6 +408,20 @@
         if (d < bestWallDist) {
           bestWallDist = d;
           best = { x: projX, y: projY, snappedToWall: true, snappedWallId: w.id };
+        }
+      }
+    }
+    // Third pass: snap to XREF endpoints/midpoints (same priority as wall endpoints)
+    if (!best.snappedToEndpoint) {
+      for (const xref of currentFloor.xrefs ?? []) {
+        if (!xref.visible || xref.type !== 'dxf') continue;
+        for (const sp of (xref as XRefDxf).snapPoints) {
+          const tp = transformXRefPoint(sp, xref.position, xref.rotation, xref.scale);
+          const d = Math.hypot(p.x - tp.x, p.y - tp.y);
+          if (d < bestDist) {
+            bestDist = d;
+            best = { x: tp.x, y: tp.y, snappedToEndpoint: true };
+          }
         }
       }
     }
@@ -717,8 +777,29 @@
     _drawAnnotation(getCS(), a, selected, dimSettings);
   }
 
+  /** Returns the wall id if `pt` lies within `tol` world-units of any wall segment. */
+  function findWallForAnnotationPoint(pt: Point, walls: Wall[], tol = 20): string | null {
+    for (const w of walls) {
+      const dx = w.end.x - w.start.x, dy = w.end.y - w.start.y;
+      const len2 = dx * dx + dy * dy;
+      if (len2 < 1) continue;
+      const t = Math.max(0, Math.min(1, ((pt.x - w.start.x) * dx + (pt.y - w.start.y) * dy) / len2));
+      const projX = w.start.x + t * dx, projY = w.start.y + t * dy;
+      if (Math.hypot(pt.x - projX, pt.y - projY) <= tol) return w.id;
+    }
+    return null;
+  }
+
   function drawAnnotations(floor: Floor) {
     _drawAnnotations(getCS(), floor, selectedAnnotationId, dimSettings);
+  }
+
+  function drawDrivenAnnotations(floor: Floor) {
+    _drawDrivenAnnotations(getCS(), floor, selectedDrivenAnnotationId, dimSettings);
+  }
+
+  function drawDetailCallouts(floor: Floor) {
+    _drawDetailCallouts(getCS(), floor, selectedCalloutId);
   }
 
   function drawAnnotationPreview() {
@@ -1074,6 +1155,36 @@
   }
 
 
+  function drawXRefUnderlays(floor: { xrefs?: import('$lib/models/types').XRef[] }) {
+    const xrefs = floor.xrefs;
+    if (!xrefs || xrefs.length === 0) return;
+    for (const xref of xrefs) {
+      if (!xref.visible || xref.type !== 'dxf') continue;
+      const dxf = xref as XRefDxf;
+      ctx.save();
+      ctx.globalAlpha = dxf.opacity;
+      ctx.strokeStyle = '#4b8fd4';
+      ctx.lineWidth = 1 / zoom;
+      ctx.setLineDash([5 / zoom, 2 / zoom]);
+      for (const ent of dxf.entities) {
+        const pts = ent.points;
+        if (pts.length < 2) continue;
+        ctx.beginPath();
+        const first = transformXRefPoint(pts[0], dxf.position, dxf.rotation, dxf.scale);
+        const fs = worldToScreen(first.x, first.y);
+        ctx.moveTo(fs.x, fs.y);
+        for (let k = 1; k < pts.length; k++) {
+          const tp = transformXRefPoint(pts[k], dxf.position, dxf.rotation, dxf.scale);
+          const ts = worldToScreen(tp.x, tp.y);
+          ctx.lineTo(ts.x, ts.y);
+        }
+        if (ent.closed) ctx.closePath();
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
   function scheduleDraw() {
     markDirty();
     requestAnimationFrame(draw);
@@ -1101,16 +1212,24 @@
       canvasDirty = true;
     }
 
+    // DXF XRef underlays — drawn before all native geometry
+    drawXRefUnderlays(floor);
+
     updateDetectedRooms();
     const selId = currentSelectedId;
     const multiIds = currentSelectedIds;
     function isSelected(id: string) { return id === selId || multiIds.has(id); }
+    // Focus mode: dims non-selected elements when a single item is selected
+    const focusMode = selId !== null && multiIds.size === 0;
+    function setFocusAlpha(id: string) { ctx.globalAlpha = focusMode && !isSelected(id) ? 0.25 : 1.0; }
+    function resetAlpha() { ctx.globalAlpha = 1.0; }
 
     drawRooms();
     drawSnapPoints();
 
     if (layerVis.walls) {
-      for (const w of floor.walls) drawWall(w, isSelected(w.id));
+      for (const w of floor.walls) { setFocusAlpha(w.id); drawWall(w, isSelected(w.id)); }
+      resetAlpha();
       drawWallJoints(floor, selId);
     }
 
@@ -1118,6 +1237,7 @@
       for (const d of floor.doors) {
         const wall = floor.walls.find((w) => w.id === d.wallId);
         if (wall) {
+          setFocusAlpha(d.id);
           drawDoorOnWall(wall, d);
           if (isSelected(d.id)) {
             // Selection highlight box
@@ -1145,6 +1265,7 @@
       for (const win of floor.windows) {
         const wall = floor.walls.find((w) => w.id === win.wallId);
         if (wall) {
+          setFocusAlpha(win.id);
           drawWindowOnWall(wall, win);
           if (isSelected(win.id)) {
             const t = win.position;
@@ -1168,13 +1289,17 @@
       }
     }
 
+    resetAlpha();
+
     // Furniture
     if (showFurniture) {
       for (const fi of floor.furniture) {
         const selected = isSelected(fi.id);
         if (selected && draggingFurnitureId === fi.id) drawAlignmentGuides(fi);
+        setFocusAlpha(fi.id);
         drawFurniture(fi, selected);
       }
+      resetAlpha();
     }
 
     // Object distance dimensions (from selected furniture to room boundaries)
@@ -1377,18 +1502,57 @@
       }
     }
 
+    // ── Precision drag overlays ──────────────────────────────────────
+    const isDraggingAny = !!(draggingFurnitureId || draggingStairId || draggingColumnId);
+    if (isDraggingAny) {
+      // Grip dots on the item being dragged (show 9 grip positions)
+      if (draggingFurnitureId && showFurniture) {
+        const draggingFi = floor.furniture.find(f => f.id === draggingFurnitureId);
+        if (draggingFi) _drawGripDots(getCS(), draggingFi, null);
+      }
+      // Approaching candidate (faint pre-snap ring)
+      if (approachingCandidate) {
+        _drawApproachingCandidate(getCS(), approachingCandidate.x, approachingCandidate.y, approachingCandidate.type as any);
+      }
+      // Snap result indicator
+      if (snapResultType && snapResultType !== 'grid' && snapResultPoint) {
+        _drawSnapIndicator(getCS(), snapResultType as any, snapResultPoint.x, snapResultPoint.y);
+      }
+      // Axis rail when Shift is held
+      if (constrainAxis) {
+        _drawAxisRail(getCS(), constrainAxis, dragStartWorld.x, dragStartWorld.y);
+      }
+      // Δ displacement tooltip
+      const draggingItem = draggingFurnitureId
+        ? floor.furniture.find(f => f.id === draggingFurnitureId)?.position
+        : draggingStairId
+          ? floor.stairs?.find(s => s.id === draggingStairId)?.position
+          : floor.columns?.find(c => c.id === draggingColumnId)?.position;
+      if (draggingItem) {
+        const dx = draggingItem.x - dragStartWorld.x;
+        const dy = draggingItem.y - dragStartWorld.y;
+        if (Math.hypot(dx, dy) > 1) {
+          _drawDragTooltip(getCS(), cursorScreenX, cursorScreenY, dx, dy, constrainAxis, dimSettings.units);
+        }
+      }
+    }
+
     // Stairs
     if (showStairs && floor.stairs) {
       for (const stair of floor.stairs) {
+        setFocusAlpha(stair.id);
         drawStair(stair, isSelected(stair.id));
       }
+      resetAlpha();
     }
 
     // Columns
     if (layerVis.columns && floor.columns) {
       for (const col of floor.columns) {
+        setFocusAlpha(col.id);
         drawColumn(col, isSelected(col.id));
       }
+      resetAlpha();
     }
 
     // Column placement preview
@@ -1587,20 +1751,32 @@
       }
     }
 
-    // Marquee selection rectangle
+    // Marquee selection rectangle — direction-aware
     if (marqueeStart && marqueeEnd) {
       const s = worldToScreen(marqueeStart.x, marqueeStart.y);
       const e = worldToScreen(marqueeEnd.x, marqueeEnd.y);
       const rx = Math.min(s.x, e.x), ry = Math.min(s.y, e.y);
       const rw = Math.abs(e.x - s.x), rh = Math.abs(e.y - s.y);
       if (rw > 2 || rh > 2) {
-        ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
-        ctx.fillRect(rx, ry, rw, rh);
-        ctx.strokeStyle = '#3b82f6';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 3]);
-        ctx.strokeRect(rx, ry, rw, rh);
-        ctx.setLineDash([]);
+        const isCrossing = marqueeEnd.x < marqueeStart.x;
+        if (isCrossing) {
+          // Crossing (R→L): green dashed box — selects anything intersected
+          ctx.fillStyle = 'rgba(34, 197, 94, 0.05)';
+          ctx.fillRect(rx, ry, rw, rh);
+          ctx.strokeStyle = '#22c55e';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([6, 3]);
+          ctx.strokeRect(rx, ry, rw, rh);
+          ctx.setLineDash([]);
+        } else {
+          // Window (L→R): blue solid box — selects only fully enclosed items
+          ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
+          ctx.fillRect(rx, ry, rw, rh);
+          ctx.strokeStyle = '#3b82f6';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([]);
+          ctx.strokeRect(rx, ry, rw, rh);
+        }
       }
     }
 
@@ -1665,6 +1841,8 @@
     if (measureStart && measuring) drawMeasurement();
     // Annotations
     if (layerVis.annotations && floor) drawAnnotations(floor);
+    if (layerVis.annotations && floor) drawDrivenAnnotations(floor);
+    if (floor) drawDetailCallouts(floor);
     // Annotation preview
     if (annotating && annotationStart) drawAnnotationPreview();
     // Text annotations
@@ -2021,17 +2199,52 @@
       return;
     }
 
+    // Detail callout placement: click on or near a wall to attach
+    if (currentPlacingDetailId && currentFloor) {
+      const walls = currentFloor.walls;
+      let bestWall: Wall | null = null;
+      let bestT = 0;
+      let bestDist = Infinity;
+      for (const w of walls) {
+        const dx = w.end.x - w.start.x, dy = w.end.y - w.start.y;
+        const len2 = dx * dx + dy * dy;
+        if (len2 < 1) continue;
+        const t = Math.max(0.05, Math.min(0.95, ((wp.x - w.start.x) * dx + (wp.y - w.start.y) * dy) / len2));
+        const projX = w.start.x + t * dx, projY = w.start.y + t * dy;
+        const dist = Math.hypot(wp.x - projX, wp.y - projY);
+        if (dist < bestDist) { bestDist = dist; bestWall = w; bestT = t; }
+      }
+      if (bestWall && bestDist < 40) {
+        const def = detailCatalog.find(d => d.id === currentPlacingDetailId);
+        if (def) {
+          const id = addWallDetailAttachment(bestWall.id, def.id, bestT, def.layers);
+          selectedCalloutId = id;
+        }
+        placingDetailId.set(null);
+      }
+      return;
+    }
+
     // Annotation tool: click first point, then second point
     if (annotating) {
       const snapped = magneticSnap(wp);
       if (!annotationStart) {
         annotationStart = { x: snapped.x, y: snapped.y };
       } else {
-        const id = addAnnotation(annotationStart.x, annotationStart.y, snapped.x, snapped.y, 40);
-        // Prompt for custom label
-        const customLabel = prompt('Annotation label (leave empty for auto dimension):');
-        if (customLabel) {
-          updateAnnotation(id, { label: customLabel });
+        const walls = currentFloor?.walls ?? [];
+        const w1 = findWallForAnnotationPoint(annotationStart, walls);
+        const w2 = findWallForAnnotationPoint(snapped, walls);
+
+        if (w1 && w2 && w1 !== w2) {
+          // Auto-detect axis: horizontal if Δx > Δy, else vertical
+          const absDx = Math.abs(snapped.x - annotationStart.x);
+          const absDy = Math.abs(snapped.y - annotationStart.y);
+          const axis: 'x' | 'y' = absDx >= absDy ? 'x' : 'y';
+          const id = addDrivenAnnotation(annotationStart.x, annotationStart.y, snapped.x, snapped.y, w1, w2, axis);
+          selectedDrivenAnnotationId = id;
+        } else {
+          const id = addAnnotation(annotationStart.x, annotationStart.y, snapped.x, snapped.y, 40);
+          selectedAnnotationId = id;
         }
         annotationStart = null;
       }
@@ -2108,6 +2321,29 @@
       selectedTextAnnotationId = null;
     }
 
+    // Detail callout click detection (select)
+    if (tool === 'select' && currentFloor?.wallDetailAttachments?.length) {
+      for (const att of currentFloor.wallDetailAttachments) {
+        const wall = currentFloor.walls.find(w => w.id === att.wallId);
+        if (!wall) continue;
+        const wx = wall.start.x + (wall.end.x - wall.start.x) * att.position;
+        const wy = wall.start.y + (wall.end.y - wall.start.y) * att.position;
+        const wdx = wall.end.x - wall.start.x, wdy = wall.end.y - wall.start.y;
+        const wlen = Math.hypot(wdx, wdy) || 1;
+        const nx = -wdy / wlen, ny = wdx / wlen;
+        const bx = wx + nx * 60, by = wy + ny * 60;
+        const sb = worldToScreen(bx, by);
+        const clickX = e.clientX - rect.left;
+        const clickY = e.clientY - rect.top;
+        if (Math.hypot(clickX - sb.x, clickY - sb.y) < 18) {
+          selectedCalloutId = att.id;
+          selectedElementId.set(att.id);
+          return;
+        }
+      }
+      selectedCalloutId = null;
+    }
+
     // Annotation click detection (select)
     if (tool === 'select' && currentFloor) {
       const hitId = hitTestAnnotation(wp, currentFloor);
@@ -2179,12 +2415,10 @@
       } else {
         // Auto-close: if clicking near the first point of the sequence, close the loop
         if (wallSequenceFirst && Math.hypot(endPt.x - wallSequenceFirst.x, endPt.y - wallSequenceFirst.y) < 20 && Math.hypot(wallStart.x - wallSequenceFirst.x, wallStart.y - wallSequenceFirst.y) > 20) {
-          addWall(wallStart, wallSequenceFirst);
-          wallStart = null;
+          tryAddWall(wallStart, wallSequenceFirst, null);
           wallSequenceFirst = null;
         } else if (Math.hypot(endPt.x - wallStart.x, endPt.y - wallStart.y) > 5) {
-          addWall(wallStart, endPt);
-          wallStart = endPt;
+          tryAddWall(wallStart, endPt, endPt);
         }
       }
     } else if (tool === 'select') {
@@ -2309,6 +2543,9 @@
           draggingColumnId = col.id;
           columnDragOffset = { x: wp.x - col.position.x, y: wp.y - col.position.y };
           commitFurnitureMove(); // snapshot before drag for undo
+          dragStartWorld = { ...col.position };
+          constrainAxis = null;
+          if (currentFloor) objectSnapCandidates = collectObjectSnapPoints(currentFloor, col.id);
         }
         return;
       }
@@ -2320,6 +2557,9 @@
           draggingStairId = stair.id;
           stairDragOffset = { x: wp.x - stair.position.x, y: wp.y - stair.position.y };
           commitFurnitureMove(); // snapshot before drag for undo
+          dragStartWorld = { ...stair.position };
+          constrainAxis = null;
+          if (currentFloor) objectSnapCandidates = collectObjectSnapPoints(currentFloor, stair.id);
         }
         return;
       }
@@ -2333,9 +2573,43 @@
           dragOffset = { x: wp.x - fi.position.x, y: wp.y - fi.position.y };
           dragStartRotation = fi.rotation;
           dragWasWallSnapped = false;
+          dragStartWorld = { ...fi.position };
+          constrainAxis = null;
+          snapResultType = null;
+          snapResultPoint = null;
+          approachingCandidate = null;
+          if (currentFloor) objectSnapCandidates = collectObjectSnapPoints(currentFloor, fi.id);
         }
         return;
       }
+      // Paint mode: detect clicked face via perpendicular dot product, apply directly
+      if ((currentPaintColor || currentPaintTexture) && currentFloor) {
+        const paintWall = findWallAt(wp);
+        if (paintWall) {
+          const dx = paintWall.end.x - paintWall.start.x;
+          const dy = paintWall.end.y - paintWall.start.y;
+          // Left-perpendicular = interior side by convention
+          const perpX = -dy, perpY = dx;
+          const midX = (paintWall.start.x + paintWall.end.x) / 2;
+          const midY = (paintWall.start.y + paintWall.end.y) / 2;
+          const toClickX = wp.x - midX, toClickY = wp.y - midY;
+          const side: 'interior' | 'exterior' = (perpX * toClickX + perpY * toClickY) > 0 ? 'interior' : 'exterior';
+          if (side === 'interior') {
+            updateWall(paintWall.id, {
+              interiorColor: currentPaintColor ?? paintWall.interiorColor,
+              interiorTexture: currentPaintTexture ?? undefined,
+            });
+          } else {
+            updateWall(paintWall.id, {
+              exteriorColor: currentPaintColor ?? paintWall.exteriorColor,
+              exteriorTexture: currentPaintTexture ?? undefined,
+            });
+          }
+          markDirty();
+          return;
+        }
+      }
+
       const wall = findWallAt(wp);
       if (wall) {
         selectElement(wall.id, e.shiftKey);
@@ -2409,6 +2683,27 @@
       return;
     }
 
+    // Double-click on a driven annotation label → enter new length
+    if ((currentTool === 'select' || currentTool === 'annotate') && currentFloor?.drivenAnnotations?.length) {
+      const wp = screenToWorld(sx, sy);
+      for (const ann of currentFloor.drivenAnnotations) {
+        const offset = ann.offset || 40;
+        const nx = -(ann.y2 - ann.y1) / (Math.hypot(ann.x2 - ann.x1, ann.y2 - ann.y1) || 1);
+        const ny = (ann.x2 - ann.x1) / (Math.hypot(ann.x2 - ann.x1, ann.y2 - ann.y1) || 1);
+        const midX = (ann.x1 + ann.x2) / 2 + nx * offset;
+        const midY = (ann.y1 + ann.y2) / 2 + ny * offset;
+        const screenMid = worldToScreen(midX, midY);
+        if (Math.hypot(sx - screenMid.x, sy - screenMid.y) < 32) {
+          selectedDrivenAnnotationId = ann.id;
+          const currentLen = Math.round(Math.hypot(ann.x2 - ann.x1, ann.y2 - ann.y1));
+          editingDrivenAnnotationId = ann.id;
+          editingDrivenAnnotationPos = { x: screenMid.x, y: screenMid.y };
+          editingDrivenAnnotationValue = String(currentLen);
+          return;
+        }
+      }
+    }
+
     // Double-click on a text annotation to edit it
     if (currentTool === 'select' && currentFloor) {
       const wp = screenToWorld(sx, sy);
@@ -2461,9 +2756,10 @@
     if (currentTool === 'wall' && wallStart && wallSequenceFirst) {
       // Auto-close the wall loop back to the first point if we have at least 2 walls
       if (Math.hypot(wallStart.x - wallSequenceFirst.x, wallStart.y - wallSequenceFirst.y) > 5) {
-        addWall(wallStart, wallSequenceFirst);
+        tryAddWall(wallStart, wallSequenceFirst, null);
+      } else {
+        wallStart = null;
       }
-      wallStart = null;
       wallSequenceFirst = null;
     }
   }
@@ -2472,6 +2768,8 @@
     markDirty();
     const rect = canvas.getBoundingClientRect();
     mousePos = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    cursorScreenX = e.clientX - rect.left;
+    cursorScreenY = e.clientY - rect.top;
 
     // Drag room label
     if (draggingRoomLabelId) {
@@ -2651,39 +2949,115 @@
       }
     }
     if (draggingColumnId && currentFloor?.columns) {
-      const basePos = { x: mousePos.x - columnDragOffset.x, y: mousePos.y - columnDragOffset.y };
-      moveColumn(draggingColumnId, { x: snap(basePos.x), y: snap(basePos.y) });
+      let basePos = { x: mousePos.x - columnDragOffset.x, y: mousePos.y - columnDragOffset.y };
+      if (shiftDown) {
+        if (!constrainAxis) {
+          const adx = Math.abs(basePos.x - dragStartWorld.x);
+          const ady = Math.abs(basePos.y - dragStartWorld.y);
+          constrainAxis = adx >= ady ? 'x' : 'y';
+          constrainBaseCenter = { ...basePos };
+        }
+        if (constrainAxis === 'x') basePos.y = constrainBaseCenter.y;
+        else basePos.x = constrainBaseCenter.x;
+      } else { constrainAxis = null; }
+      // Object snap for columns: test mousePos against candidates
+      let snapped = { x: snap(basePos.x), y: snap(basePos.y) };
+      const snapThr = MAGNETIC_SNAP / zoom;
+      for (const cand of objectSnapCandidates) {
+        if (Math.hypot(mousePos.x - cand.x, mousePos.y - cand.y) < snapThr) {
+          snapped = { x: cand.x - columnDragOffset.x, y: cand.y - columnDragOffset.y };
+          snapResultType = cand.type as SnapType; snapResultPoint = { x: cand.x, y: cand.y };
+          break;
+        }
+      }
+      moveColumn(draggingColumnId, snapped);
     }
     if (draggingStairId && currentFloor?.stairs) {
-      const basePos = { x: mousePos.x - stairDragOffset.x, y: mousePos.y - stairDragOffset.y };
-      moveStair(draggingStairId, { x: snap(basePos.x), y: snap(basePos.y) });
+      let basePos = { x: mousePos.x - stairDragOffset.x, y: mousePos.y - stairDragOffset.y };
+      if (shiftDown) {
+        if (!constrainAxis) {
+          const adx = Math.abs(basePos.x - dragStartWorld.x);
+          const ady = Math.abs(basePos.y - dragStartWorld.y);
+          constrainAxis = adx >= ady ? 'x' : 'y';
+          constrainBaseCenter = { ...basePos };
+        }
+        if (constrainAxis === 'x') basePos.y = constrainBaseCenter.y;
+        else basePos.x = constrainBaseCenter.x;
+      } else { constrainAxis = null; }
+      let snapped = { x: snap(basePos.x), y: snap(basePos.y) };
+      const snapThr = MAGNETIC_SNAP / zoom;
+      for (const cand of objectSnapCandidates) {
+        if (Math.hypot(mousePos.x - cand.x, mousePos.y - cand.y) < snapThr) {
+          snapped = { x: cand.x - stairDragOffset.x, y: cand.y - stairDragOffset.y };
+          snapResultType = cand.type as SnapType; snapResultPoint = { x: cand.x, y: cand.y };
+          break;
+        }
+      }
+      moveStair(draggingStairId, snapped);
     }
     if (draggingFurnitureId) {
-      const basePos = { x: mousePos.x - dragOffset.x, y: mousePos.y - dragOffset.y };
+      let basePos = { x: mousePos.x - dragOffset.x, y: mousePos.y - dragOffset.y };
       const fi = currentFloor?.furniture.find(f => f.id === draggingFurnitureId);
       if (fi) {
+        // Shift-constrain: lock to X or Y axis
+        if (shiftDown) {
+          if (!constrainAxis) {
+            const adx = Math.abs(basePos.x - dragStartWorld.x);
+            const ady = Math.abs(basePos.y - dragStartWorld.y);
+            constrainAxis = adx >= ady ? 'x' : 'y';
+            constrainBaseCenter = { ...fi.position };
+          }
+          if (constrainAxis === 'x') basePos.y = constrainBaseCenter.y;
+          else basePos.x = constrainBaseCenter.x;
+        } else {
+          constrainAxis = null;
+        }
+
         const wallSnap = snapFurnitureToWall(basePos, fi.catalogId, fi.rotation);
         if (wallSnap) {
           moveFurniture(draggingFurnitureId, wallSnap.position);
           setFurnitureRotation(draggingFurnitureId, wallSnap.rotation);
           dragWasWallSnapped = true;
           wallSnapInfo = { wallId: wallSnap.wallId, side: wallSnap.side, wallAngle: wallSnap.wallAngle };
+          snapResultType = 'wall';
+          snapResultPoint = wallSnap.position;
+          approachingCandidate = null;
         } else {
           const snapped = { x: snap(basePos.x), y: snap(basePos.y) };
-          // Snap to guide lines
-          const GUIDE_SNAP = 10; // world units
+          // Guide line snap
+          const GUIDE_SNAP = 10;
           if (currentFloor?.guides) {
             for (const g of currentFloor.guides) {
-              if (g.orientation === 'horizontal' && Math.abs(snapped.y - g.position) < GUIDE_SNAP) {
-                snapped.y = g.position;
-              }
-              if (g.orientation === 'vertical' && Math.abs(snapped.x - g.position) < GUIDE_SNAP) {
-                snapped.x = g.position;
-              }
+              if (g.orientation === 'horizontal' && Math.abs(snapped.y - g.position) < GUIDE_SNAP) snapped.y = g.position;
+              if (g.orientation === 'vertical' && Math.abs(snapped.x - g.position) < GUIDE_SNAP) snapped.x = g.position;
             }
           }
+          // Object-to-object snap: test mousePos (= the point being dragged) against candidates
+          const snapThreshold = MAGNETIC_SNAP / zoom;
+          const approachThreshold = snapThreshold * 2;
+          let bestObjSnap: ObjSnapPoint | null = null;
+          let bestObjDist = snapThreshold;
+          let bestApproach: ObjSnapPoint | null = null;
+          let bestApproachDist = approachThreshold;
+          for (const cand of objectSnapCandidates) {
+            const d = Math.hypot(mousePos.x - cand.x, mousePos.y - cand.y);
+            if (d < bestObjDist) { bestObjDist = d; bestObjSnap = cand; }
+            else if (d < bestApproachDist) { bestApproachDist = d; bestApproach = cand; }
+          }
+          if (bestObjSnap) {
+            // Snap mousePos to candidate → center = candidate - dragOffset
+            snapped.x = bestObjSnap.x - dragOffset.x;
+            snapped.y = bestObjSnap.y - dragOffset.y;
+            snapResultType = bestObjSnap.type as SnapType;
+            snapResultPoint = { x: bestObjSnap.x, y: bestObjSnap.y };
+            approachingCandidate = null;
+          } else {
+            snapResultType = 'grid';
+            snapResultPoint = snapped;
+            approachingCandidate = bestApproach;
+          }
+
           moveFurniture(draggingFurnitureId, snapped);
-          // Restore original rotation when leaving wall snap
           if (dragWasWallSnapped) {
             setFurnitureRotation(draggingFurnitureId, dragStartRotation);
             dragWasWallSnapped = false;
@@ -2751,6 +3125,7 @@
 
     // Finalize marquee selection
     if (marqueeStart && marqueeEnd && currentFloor) {
+      const isCrossing = marqueeEnd.x < marqueeStart.x;
       const minX = Math.min(marqueeStart.x, marqueeEnd.x);
       const maxX = Math.max(marqueeStart.x, marqueeEnd.x);
       const minY = Math.min(marqueeStart.y, marqueeEnd.y);
@@ -2758,7 +3133,6 @@
       const marqueeW = maxX - minX;
       const marqueeH = maxY - minY;
 
-      // Only treat as marquee if dragged at least a small distance
       if (marqueeW > 5 || marqueeH > 5) {
         const ids = new Set<string>(e.shiftKey ? currentSelectedIds : []);
 
@@ -2766,47 +3140,86 @@
           return p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY;
         }
 
-        // Walls: both endpoints inside
-        for (const w of currentFloor.walls) {
-          if (ptInRect(w.start) && ptInRect(w.end)) ids.add(w.id);
-        }
-        // Doors/windows: center point inside
-        for (const d of currentFloor.doors) {
-          const w = currentFloor.walls.find(w => w.id === d.wallId);
-          if (w) {
-            const cx = w.start.x + (w.end.x - w.start.x) * d.position;
-            const cy = w.start.y + (w.end.y - w.start.y) * d.position;
-            if (ptInRect({ x: cx, y: cy })) ids.add(d.id);
+        // Crossing: line segment vs AABB — segment crosses if at least one endpoint inside OR segment intersects a rect edge
+        function segIntersectsRect(ax: number, ay: number, bx: number, by: number): boolean {
+          if (ptInRect({ x: ax, y: ay }) || ptInRect({ x: bx, y: by })) return true;
+          // Check if segment crosses any of the four rect edges
+          function segsIntersect(x1: number, y1: number, x2: number, y2: number, x3: number, y3: number, x4: number, y4: number): boolean {
+            const d1x = x2 - x1, d1y = y2 - y1, d2x = x4 - x3, d2y = y4 - y3;
+            const cross = d1x * d2y - d1y * d2x;
+            if (Math.abs(cross) < 1e-9) return false;
+            const t = ((x3 - x1) * d2y - (y3 - y1) * d2x) / cross;
+            const u = ((x3 - x1) * d1y - (y3 - y1) * d1x) / cross;
+            return t >= 0 && t <= 1 && u >= 0 && u <= 1;
           }
+          return segsIntersect(ax, ay, bx, by, minX, minY, maxX, minY)
+              || segsIntersect(ax, ay, bx, by, maxX, minY, maxX, maxY)
+              || segsIntersect(ax, ay, bx, by, maxX, maxY, minX, maxY)
+              || segsIntersect(ax, ay, bx, by, minX, maxY, minX, minY);
         }
-        for (const win of currentFloor.windows) {
-          const w = currentFloor.walls.find(w => w.id === win.wallId);
-          if (w) {
-            const cx = w.start.x + (w.end.x - w.start.x) * win.position;
-            const cy = w.start.y + (w.end.y - w.start.y) * win.position;
-            if (ptInRect({ x: cx, y: cy })) ids.add(win.id);
+
+        if (isCrossing) {
+          // Crossing (R→L): select anything that intersects the box
+          for (const w of currentFloor.walls) {
+            if (segIntersectsRect(w.start.x, w.start.y, w.end.x, w.end.y)) ids.add(w.id);
           }
-        }
-        // Furniture: center inside
-        for (const fi of currentFloor.furniture) {
-          if (ptInRect(fi.position)) ids.add(fi.id);
-        }
-        // Stairs: center inside
-        if (currentFloor.stairs) {
-          for (const st of currentFloor.stairs) {
-            if (ptInRect(st.position)) ids.add(st.id);
+          for (const d of currentFloor.doors) {
+            const w = currentFloor.walls.find(w => w.id === d.wallId);
+            if (w) {
+              const cx = w.start.x + (w.end.x - w.start.x) * d.position;
+              const cy = w.start.y + (w.end.y - w.start.y) * d.position;
+              if (ptInRect({ x: cx, y: cy })) ids.add(d.id);
+            }
           }
-        }
-        // Columns: center inside
-        if (currentFloor.columns) {
-          for (const col of currentFloor.columns) {
-            if (ptInRect(col.position)) ids.add(col.id);
+          for (const win of currentFloor.windows) {
+            const w = currentFloor.walls.find(w => w.id === win.wallId);
+            if (w) {
+              const cx = w.start.x + (w.end.x - w.start.x) * win.position;
+              const cy = w.start.y + (w.end.y - w.start.y) * win.position;
+              if (ptInRect({ x: cx, y: cy })) ids.add(win.id);
+            }
           }
+          for (const fi of currentFloor.furniture) {
+            // OBB approximation: check center or any corner vs rect
+            const hw = (fi.width ?? 60) / 2, hd = (fi.depth ?? 60) / 2;
+            const cos = Math.cos((fi.rotation * Math.PI) / 180);
+            const sin = Math.sin((fi.rotation * Math.PI) / 180);
+            const corners = [[-hw,-hd],[hw,-hd],[hw,hd],[-hw,hd]].map(([lx,ly]) => ({
+              x: fi.position.x + lx * cos - ly * sin,
+              y: fi.position.y + lx * sin + ly * cos
+            }));
+            if (corners.some(c => ptInRect(c)) || ptInRect(fi.position)) ids.add(fi.id);
+          }
+          if (currentFloor.stairs) for (const st of currentFloor.stairs) { if (ptInRect(st.position)) ids.add(st.id); }
+          if (currentFloor.columns) for (const col of currentFloor.columns) { if (ptInRect(col.position)) ids.add(col.id); }
+        } else {
+          // Window (L→R): select only fully-enclosed items
+          for (const w of currentFloor.walls) {
+            if (ptInRect(w.start) && ptInRect(w.end)) ids.add(w.id);
+          }
+          for (const d of currentFloor.doors) {
+            const w = currentFloor.walls.find(w => w.id === d.wallId);
+            if (w) {
+              const cx = w.start.x + (w.end.x - w.start.x) * d.position;
+              const cy = w.start.y + (w.end.y - w.start.y) * d.position;
+              if (ptInRect({ x: cx, y: cy })) ids.add(d.id);
+            }
+          }
+          for (const win of currentFloor.windows) {
+            const w = currentFloor.walls.find(w => w.id === win.wallId);
+            if (w) {
+              const cx = w.start.x + (w.end.x - w.start.x) * win.position;
+              const cy = w.start.y + (w.end.y - w.start.y) * win.position;
+              if (ptInRect({ x: cx, y: cy })) ids.add(win.id);
+            }
+          }
+          for (const fi of currentFloor.furniture) { if (ptInRect(fi.position)) ids.add(fi.id); }
+          if (currentFloor.stairs) for (const st of currentFloor.stairs) { if (ptInRect(st.position)) ids.add(st.id); }
+          if (currentFloor.columns) for (const col of currentFloor.columns) { if (ptInRect(col.position)) ids.add(col.id); }
         }
 
         if (ids.size > 0) {
           selectedElementIds.set(ids);
-          // Set primary selection to first element
           const first = ids.values().next().value;
           if (first) selectedElementId.set(first);
         }
@@ -2829,6 +3242,12 @@
     draggingRoomId = null;
     roomDragStartPositions.clear();
     draggingMultiSelect = null;
+    if (draggingWallParallel) {
+      syncDrivenAnnotationsForWall(draggingWallParallel.wallId);
+    }
+    if (draggingWallEndpoint) {
+      syncDrivenAnnotationsForWall(draggingWallEndpoint.wallId);
+    }
     draggingWallParallel = null;
     draggingCurveHandle = null;
     draggingFurnitureId = null;
@@ -2840,6 +3259,11 @@
     draggingWallEndpoint = null;
     draggingConnectedEndpoints = [];
     wallSnapInfo = null;
+    snapResultType = null;
+    snapResultPoint = null;
+    approachingCandidate = null;
+    constrainAxis = null;
+    objectSnapCandidates = [];
     if (measuring && measureStart && measureEnd) {
       // Keep measurement visible until next click
     }
@@ -2890,6 +3314,22 @@
     shiftDown = e.shiftKey;
     if (e.code === 'Space') { spaceDown = true; e.preventDefault(); return; }
 
+    // Delete selected walls, furniture, doors, windows (any element with an id)
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !editingTextAnnotationId) {
+      if (currentSelectedIds.size > 0) {
+        beginUndoGroup();
+        for (const id of currentSelectedIds) removeElement(id);
+        endUndoGroup();
+        selectedElementIds.set(new Set());
+        selectedElementId.set(null);
+        e.preventDefault(); return;
+      } else if (currentSelectedId && !selectedGuideId && !selectedMeasurementId && !selectedTextAnnotationId && !selectedAnnotationId) {
+        removeElement(currentSelectedId);
+        selectedElementId.set(null);
+        e.preventDefault(); return;
+      }
+    }
+
     // Delete selected guide line
     if ((e.key === 'Delete' || e.key === 'Backspace') && selectedGuideId) {
       removeGuide(selectedGuideId);
@@ -2923,11 +3363,38 @@
       return;
     }
 
+    // Delete selected driven annotation
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDrivenAnnotationId) {
+      removeDrivenAnnotation(selectedDrivenAnnotationId);
+      selectedDrivenAnnotationId = null;
+      e.preventDefault();
+      return;
+    }
+
+    // Delete selected detail callout
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedCalloutId) {
+      removeWallDetailAttachment(selectedCalloutId);
+      selectedCalloutId = null;
+      e.preventDefault();
+      return;
+    }
+
+    // Escape cancels detail placement
+    if (e.code === 'Escape' && currentPlacingDetailId) {
+      placingDetailId.set(null);
+      e.preventDefault();
+      return;
+    }
+
     // Canvas-specific Escape handling (before global shortcut eats it)
     if (e.code === 'Escape') {
+      if (wallMergeDialogOpen) { onMergeCancel(); return; }
       wallStart = null; wallSequenceFirst = null;
       placingFurnitureId.set(null);
       placingRotation.set(0);
+      // Also cancel any 3D ghost placements so the ghost is removed from the scene
+      placingStair.set(false);
+      placingColumn.set(false);
       editingTextAnnotationId = null;
       textAnnotationMode = false;
       measuring = false;
@@ -3097,8 +3564,7 @@
     // 'C' to close wall loop back to first point (but not Ctrl+C)
     if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey && wallStart && wallSequenceFirst) {
       if (Math.hypot(wallStart.x - wallSequenceFirst.x, wallStart.y - wallSequenceFirst.y) > 5) {
-        addWall(wallStart, wallSequenceFirst);
-        wallStart = null;
+        tryAddWall(wallStart, wallSequenceFirst, null);
         wallSequenceFirst = null;
       }
     }
@@ -3419,6 +3885,83 @@
     }
   }
 
+  /**
+   * Adds a wall, checking for overlaps with existing walls.
+   * If autoMergeWalls is on, adds directly. Otherwise shows the merge dialog.
+   * `nextStart` is where wallStart should advance to after the action completes.
+   */
+  function tryAddWall(a: Point, b: Point, nextStart: Point | null) {
+    const floor = currentFloor;
+    if (!floor) { addWall(a, b); wallStart = nextStart; markDirty(); return; }
+
+    const newWall: Wall = { id: '__preview__', start: a, end: b, thickness: 10, height: 250, materialId: undefined, interiorMaterialId: undefined, exteriorMaterialId: undefined };
+    const overlaps = floor.walls.some(w => wallSegmentsOverlap(newWall, w));
+
+    if (!overlaps || $autoMergeWalls) {
+      addWall(a, b);
+      wallStart = nextStart;
+      markDirty();
+      return;
+    }
+
+    // Hold pending info and show dialog
+    pendingWallA = a;
+    pendingWallB = b;
+    pendingWallNext = nextStart;
+    wallMergeDialogOpen = true;
+  }
+
+  function onMergeConfirm(alwaysMerge: boolean) {
+    wallMergeDialogOpen = false;
+    if (alwaysMerge) autoMergeWalls.set(true);
+    if (pendingWallA && pendingWallB) addWall(pendingWallA, pendingWallB);
+    wallStart = pendingWallNext;
+    pendingWallA = null; pendingWallB = null; pendingWallNext = null;
+    markDirty();
+  }
+
+  function onMergeKeep() {
+    wallMergeDialogOpen = false;
+    if (pendingWallA && pendingWallB) addWall(pendingWallA, pendingWallB);
+    wallStart = pendingWallNext;
+    pendingWallA = null; pendingWallB = null; pendingWallNext = null;
+    markDirty();
+  }
+
+  function onMergeCancel() {
+    wallMergeDialogOpen = false;
+    // Discard the pending segment — wallStart stays where it was
+    pendingWallA = null; pendingWallB = null; pendingWallNext = null;
+    markDirty();
+  }
+
+  function onDimensionCommit(mm: number) {
+    if (!wallStart) return;
+    const lengthCm = mm / 10;
+    // Compute current wall direction from cursor position
+    const dx = mousePos.x - wallStart.x;
+    const dy = mousePos.y - wallStart.y;
+    const dist = Math.hypot(dx, dy);
+    let endPt: Point;
+    if (dist < 1) {
+      // No direction yet — default to rightward
+      endPt = { x: wallStart.x + lengthCm, y: wallStart.y };
+    } else {
+      const ux = dx / dist, uy = dy / dist;
+      endPt = { x: wallStart.x + ux * lengthCm, y: wallStart.y + uy * lengthCm };
+    }
+    if (shiftDown) {
+      // Ortho lock: snap to nearest cardinal
+      const angle = Math.atan2(endPt.y - wallStart.y, endPt.x - wallStart.x);
+      const snapAngles = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
+      let best = 0, bestDiff = Infinity;
+      for (const sa of snapAngles) { const diff = Math.abs(angle - sa); if (diff < bestDiff) { bestDiff = diff; best = sa; } }
+      endPt = { x: wallStart.x + lengthCm * Math.cos(best), y: wallStart.y + lengthCm * Math.sin(best) };
+    }
+    tryAddWall(wallStart, endPt, endPt);
+    markDirty();
+  }
+
   let cursorStyle = $derived(
     spaceDown || isPanning || $panMode || (shiftDown && currentTool === 'select') ? 'grab' :
     draggingFurnitureId ? 'move' :
@@ -3463,6 +4006,25 @@
     ondragleave={onDragLeave}
     ondrop={onDrop}
   ></canvas>
+
+  <!-- Dimension input overlay: appears when drawing a wall after first click -->
+  {#if currentTool === 'wall' && wallStart !== null}
+    <DimensionInput
+      x={cursorScreenX}
+      y={cursorScreenY}
+      onCommit={onDimensionCommit}
+      onCancel={() => { wallStart = null; wallSequenceFirst = null; markDirty(); }}
+    />
+  {/if}
+
+  <!-- Wall merge dialog: shown when new wall intersects an existing wall -->
+  {#if wallMergeDialogOpen}
+    <WallMergeDialog
+      onMerge={onMergeConfirm}
+      onKeep={onMergeKeep}
+      onCancel={onMergeCancel}
+    />
+  {/if}
   <!-- Inline room name editor -->
   {#if editingRoomId}
     <input
@@ -3537,6 +4099,37 @@
       autofocus
     />
   {/if}
+  <!-- Inline driven annotation editor (parametric dimension) -->
+  {#if editingDrivenAnnotationId}
+    <input
+      type="number"
+      class="absolute bg-white border-2 border-orange-400 rounded px-2 py-1 text-sm text-center font-semibold shadow-lg outline-none"
+      style="left: {editingDrivenAnnotationPos.x}px; top: {editingDrivenAnnotationPos.y}px; transform: translate(-50%, -50%); z-index: 20; min-width: 90px;"
+      value={editingDrivenAnnotationValue}
+      oninput={(e) => { editingDrivenAnnotationValue = (e.target as HTMLInputElement).value; }}
+      onkeydown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') {
+          const newLen = parseFloat(editingDrivenAnnotationValue);
+          if (!isNaN(newLen) && newLen > 0) {
+            resolveDrivenDimension(editingDrivenAnnotationId!, newLen);
+          }
+          editingDrivenAnnotationId = null;
+        } else if (e.key === 'Escape') {
+          editingDrivenAnnotationId = null;
+        }
+      }}
+      onblur={() => {
+        const newLen = parseFloat(editingDrivenAnnotationValue);
+        if (!isNaN(newLen) && newLen > 0 && editingDrivenAnnotationId) {
+          resolveDrivenDimension(editingDrivenAnnotationId, newLen);
+        }
+        editingDrivenAnnotationId = null;
+      }}
+      autofocus
+    />
+  {/if}
+
   <!-- Mini-map -->
   {#if showMinimap && currentFloor && currentFloor.walls.length > 0}
     <canvas
