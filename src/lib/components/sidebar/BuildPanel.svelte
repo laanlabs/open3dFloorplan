@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { selectedTool, placingFurnitureId, placingDoorType, placingWindowType, placingStair, addStair, placingColumn, placingColumnShape, activeFloor, setBackgroundImage, canvasCamX, canvasCamY, viewMode, placingRoomPresetId, placingRoomTemplateName } from '$lib/stores/project';
+  import { selectedTool, placingFurnitureId, placingDoorType, placingWindowType, placingStair, placingStairType, addStair, placingColumn, placingColumnShape, activeFloor, setBackgroundImage, canvasCamX, canvasCamY, viewMode, placingRoomPresetId, placingRoomTemplateName, wallPaintColor, wallPaintTexture, wallPaintFace, addXRef, removeXRef, updateXRef, placingWallSubType, placingWallHeight, placingDetailId } from '$lib/stores/project';
+  import { detailCatalog, detailCategories } from '$lib/utils/detailCatalog';
   import { get } from 'svelte/store';
   import type { Tool } from '$lib/stores/project';
-  import type { Door, Window as Win } from '$lib/models/types';
+  import type { Door, Window as Win, XRef, XRefDxf, XRefNative } from '$lib/models/types';
   import { roomPresets, placePreset } from '$lib/utils/roomPresets';
+  import { wallColors, floorMaterials } from '$lib/utils/materials';
   import { roomTemplates, placeRoomTemplate } from '$lib/utils/roomTemplates';
   import { furnitureCatalog, furnitureCategories } from '$lib/utils/furnitureCatalog';
   import type { FurnitureDef } from '$lib/utils/furnitureCatalog';
@@ -12,19 +14,124 @@
   import { importRoomPlan, extractRoomJsonFromZip, ORTHO_VERSION } from '$lib/utils/roomplanImport';
   import { currentProject, loadProject, importFloorIntoCurrentProject, createDefaultProject } from '$lib/stores/project';
   import type { Project } from '$lib/models/types';
+  import { parseDxf, computeXRefSnapPoints } from '$lib/utils/dxfParser';
+  import { placingEntourageDefId, addCustomEntourage, removeCustomEntourage } from '$lib/stores/project';
+  import { entourageCatalog, entourageCategories } from '$lib/utils/entourageCatalog';
+  import type { EntourageDef, CustomEntourageDef, EntourageViewType } from '$lib/models/types';
+  // @ts-ignore — EntourageUploadDialog is added in Task 7
+  import EntourageUploadDialog from '$lib/components/editor/EntourageUploadDialog.svelte';
 
   // AreaSummaryPanel moved to top bar dialog
-  let activeTab = $state<'draw' | 'furniture'>('draw');
+  let activeTab = $state<'draw' | 'furniture' | 'entourage'>('draw');
+
+  // Entourage tab state
+  let entourageViewFilter = $state<EntourageViewType>('plan');
+  let entourageCategoryOpen = $state<Record<string, boolean>>({
+    people: false,
+    vehicles: true,
+    trees: true,
+    landscaping: true,
+  });
+  let currentPlacingEntourageId = $state<string | null>(null);
+  placingEntourageDefId.subscribe(id => { currentPlacingEntourageId = id; });
+  let showEntourageUpload = $state(false);
+  let $customEntourage = $state<CustomEntourageDef[]>([]);
+  currentProject.subscribe(p => { $customEntourage = p?.customEntourage ?? []; });
+
+  // AEC top-level group open states
+  let archOpen = $state(true);
+  let structOpen = $state(false);
+  let mepOpen = $state(false);
+  let detailsOpen = $state(false);
+
+  // Construction detail sub-accordion states (one per category label)
+  let detailSubOpen = $state<Record<string, boolean>>({ Architecture: true, Structure: false, MEP: false });
+  // Current detail being placed
+  let currentPlacingDetailId = $state<string | null>(null);
+  placingDetailId.subscribe(id => { currentPlacingDetailId = id; });
 
   // Build sub-section open states
-  let wallOpen = $state(true);
+  let wallDrawOpen = $state(true);
+  let wallOpen = $state(false);
   let flooringOpen = $state(false);
   let ceilingOpen = $state(false);
   let openingOpen = $state(true);
   let structuresOpen = $state(false);
+  let columnsOpen = $state(false);
   let roomOpen = $state(false);
   let annotateOpen = $state(false);
   let importOpen = $state(false);
+  let xrefOpen = $state(false);
+
+  // XRef import state
+  let xrefDxfDialog = $state(false);
+  let xrefDxfName = $state('');
+  let xrefDxfScale = $state(0.1); // mm→cm default
+  let xrefDxfText = $state('');
+
+  let xrefNativeDialog = $state(false);
+  let xrefNativeName = $state('');
+  let xrefNativeJson = $state('');
+  let xrefNativeFloorOptions = $state<{ label: string; index: number }[]>([]);
+  let xrefNativeFloorIndex = $state(0);
+
+  function uid() { return Math.random().toString(36).slice(2, 10); }
+
+  function onLinkDxf() {
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = '.dxf';
+    input.onchange = async () => {
+      const file = input.files?.[0]; if (!file) return;
+      xrefDxfText = await file.text();
+      xrefDxfName = file.name.replace(/\.dxf$/i, '');
+      xrefDxfDialog = true;
+    };
+    input.click();
+  }
+
+  function confirmLinkDxf() {
+    const entities = parseDxf(xrefDxfText, xrefDxfScale);
+    const snapPoints = computeXRefSnapPoints(entities);
+    const xref: XRefDxf = {
+      id: uid(), name: xrefDxfName, type: 'dxf',
+      position: { x: 0, y: 0 }, rotation: 0, scale: 1, opacity: 0.7, visible: true,
+      sourceText: xrefDxfText, entities, snapPoints,
+    };
+    addXRef(xref);
+    xrefDxfDialog = false; xrefDxfText = '';
+  }
+
+  function onLinkNative() {
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = '.carpentra,.json';
+    input.onchange = async () => {
+      const file = input.files?.[0]; if (!file) return;
+      try {
+        const text = await file.text();
+        const proj: Project = JSON.parse(text);
+        xrefNativeJson = text;
+        xrefNativeName = proj.name ?? file.name.replace(/\.(carpentra|json)$/i, '');
+        xrefNativeFloorOptions = proj.floors.map((f, i) => ({ label: f.name ?? `Floor ${i}`, index: i }));
+        xrefNativeFloorIndex = 0;
+        xrefNativeDialog = true;
+      } catch { alert('Invalid project file'); }
+    };
+    input.click();
+  }
+
+  function confirmLinkNative() {
+    const xref: XRefNative = {
+      id: uid(), name: xrefNativeName, type: 'native',
+      position: { x: 0, y: 0 }, positionY: 0, rotation: 0, scale: 1, visible: true,
+      sourceJson: xrefNativeJson, floorIndex: xrefNativeFloorIndex,
+    };
+    addXRef(xref);
+    xrefNativeDialog = false; xrefNativeJson = '';
+  }
+
+  // Reactive XRef list from active floor
+  let currentXrefs = $state<XRef[]>([]);
+  activeFloor.subscribe(floor => { currentXrefs = floor?.xrefs ?? []; });
 
   // Legacy — kept for compat; unused after restructure
   let constructionOpen = $state(true);
@@ -175,6 +282,7 @@
   placingColumn.subscribe(v => { isPlacingColumn = v; });
 
   function onPlaceStair() {
+    placingStairType.set('straight');
     placingStair.set(true);
     selectedTool.set('select');
     placingFurnitureId.set(null);
@@ -305,6 +413,48 @@
     hoverPos = { x, y };
   }
 
+  // Wall finish panel state
+  let wallFinishFace = $state<'interior' | 'exterior'>('interior');
+  let wallFinishColor = $state<string | null>(null);
+  let wallFinishTexture = $state<string | null>(null);
+
+  function activateWallPaint(color: string | null, texture: string | null) {
+    wallFinishColor = color;
+    wallFinishTexture = texture;
+    wallPaintColor.set(color);
+    wallPaintTexture.set(texture);
+    wallPaintFace.set(wallFinishFace);
+  }
+
+  function clearWallPaint() {
+    wallFinishColor = null;
+    wallFinishTexture = null;
+    wallPaintColor.set(null);
+    wallPaintTexture.set(null);
+  }
+
+  $effect(() => {
+    wallPaintFace.set(wallFinishFace);
+  });
+
+  // Floor texture filename map (material id → /textures/floor-*.jpg)
+  const floorTextures: Record<string, string> = {
+    'light-oak': '/textures/floor-light-oak.jpg',
+    'walnut': '/textures/floor-walnut.jpg',
+    'bamboo': '/textures/floor-bamboo.jpg',
+    'laminate': '/textures/floor-laminate.jpg',
+    'ceramic-white': '/textures/floor-tile-white.jpg',
+    'ceramic-gray': '/textures/floor-tile-gray.jpg',
+    'porcelain': '/textures/floor-porcelain.jpg',
+    'marble-white': '/textures/floor-marble-white.jpg',
+    'marble-dark': '/textures/floor-marble-dark.jpg',
+    'carpet-beige': '/textures/floor-carpet-beige.jpg',
+    'carpet-gray': '/textures/floor-carpet-gray.jpg',
+    'concrete': '/textures/floor-concrete.jpg',
+    'slate': '/textures/floor-slate.jpg',
+    'vinyl': '/textures/floor-vinyl.jpg',
+  };
+
   const categoryColors: Record<string, string> = {
     'Living Room': '#a78bfa',
     'Bedroom': '#60a5fa',
@@ -334,60 +484,151 @@
       class="flex-1 py-2.5 text-xs font-semibold uppercase tracking-wide {activeTab === 'furniture' ? 'text-slate-800 border-b-2 border-blue-500 bg-blue-50' : 'text-gray-500 hover:text-gray-700'}"
       onclick={() => activeTab = 'furniture'}
     >Furniture</button>
+    <button
+      class="flex-1 py-1.5 text-xs font-medium rounded transition-colors {activeTab === 'entourage' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}"
+      onclick={() => activeTab = 'entourage'}
+    >
+      Entourage
+    </button>
   </div>
 
   <div class="flex-1 overflow-y-auto p-3">
     {#if activeTab === 'draw'}
-      <div class="space-y-0.5">
+      <div class="space-y-0">
 
-        <!-- 1. Wall -->
+        <!-- ═══ ARCHITECTURE ═══ -->
+        <button class="w-full flex items-center justify-between px-2 py-2.5 rounded-lg hover:bg-blue-50 group" onclick={() => archOpen = !archOpen}>
+          <div class="flex items-center gap-2">
+            <div class="w-1 h-4 rounded-full bg-blue-400 group-hover:bg-blue-500 transition-colors"></div>
+            <span class="text-xs font-bold uppercase tracking-widest text-blue-600">Architecture</span>
+          </div>
+          <span class="text-blue-400 text-xs">{archOpen ? '▼' : '▶'}</span>
+        </button>
+
+        {#if archOpen}
+        <div class="pl-3 space-y-0.5 border-l-2 border-blue-100 ml-2 mb-1">
+
+        <!-- Wall Drawing -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => wallDrawOpen = !wallDrawOpen}>
+          <span class="text-xs font-semibold text-gray-600">Walls</span>
+          <span class="text-gray-400 text-xs">{wallDrawOpen ? '▼' : '▶'}</span>
+        </button>
+        {#if wallDrawOpen}
+          <div class="pb-3 px-1 space-y-2">
+            <div class="grid grid-cols-3 gap-1.5">
+              <button
+                onclick={() => { selectedTool.set('wall'); placingWallSubType.set('standard'); placingWallHeight.set(280); }}
+                class="flex flex-col items-center gap-1 p-2 rounded-lg border-2 text-xs font-medium transition-colors {$selectedTool === 'wall' && $placingWallSubType === 'standard' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50'}"
+                title="Draw Wall (W)">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="1"/></svg>
+                Wall
+              </button>
+              <button
+                onclick={() => { selectedTool.set('wall'); placingWallSubType.set('half'); placingWallHeight.set(120); }}
+                class="flex flex-col items-center gap-1 p-2 rounded-lg border-2 text-xs font-medium transition-colors {$selectedTool === 'wall' && $placingWallSubType === 'half' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50'}"
+                title="Half-Wall (120cm)">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="10" width="18" height="11" rx="1"/><line x1="3" y1="10" x2="21" y2="10" stroke-dasharray="3 2"/></svg>
+                Half-Wall
+              </button>
+              <button
+                onclick={() => { selectedTool.set('wall'); placingWallSubType.set('curved'); placingWallHeight.set(280); }}
+                class="flex flex-col items-center gap-1 p-2 rounded-lg border-2 text-xs font-medium transition-colors {$selectedTool === 'wall' && $placingWallSubType === 'curved' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50'}"
+                title="Curved Wall">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20 Q12 4 20 20"/></svg>
+                Curved
+              </button>
+            </div>
+            <div class="flex items-center gap-2 px-1">
+              <label class="text-[10px] text-gray-400 shrink-0">Height (cm)</label>
+              <input type="number" min="30" max="600" step="10"
+                value={$placingWallHeight}
+                oninput={(e) => placingWallHeight.set(Number((e.target as HTMLInputElement).value))}
+                class="flex-1 text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:border-blue-400" />
+            </div>
+          </div>
+        {/if}
+
+        <!-- 1. Wall Finish -->
         <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => wallOpen = !wallOpen}>
-          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Wall</span>
+          <span class="text-xs font-semibold text-gray-600">Wall Finish</span>
           <span class="text-gray-400 text-xs">{wallOpen ? '▼' : '▶'}</span>
         </button>
         {#if wallOpen}
-          <div class="space-y-1 pb-2">
-            <button
-              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'select' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-              onclick={() => setTool('select')}
-            >
-              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'select' ? 'bg-blue-100' : ''}">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/></svg>
+          <div class="pb-3 px-1 space-y-2.5">
+            <!-- Active paint indicator + clear -->
+            {#if wallFinishColor || wallFinishTexture}
+              <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-blue-50 border border-blue-200">
+                <div class="w-5 h-5 rounded border border-white shadow-sm shrink-0"
+                  style={wallFinishTexture ? `background: url(/textures/${wallFinishTexture === 'brick' ? 'brick' : wallFinishTexture === 'stone' ? 'stone' : wallFinishTexture === 'wood-panel' ? 'wood-panel' : wallFinishTexture === 'concrete' ? 'concrete' : wallFinishTexture === 'tile' ? 'subway-tile' : 'brick'}.jpg) center/cover` : `background: ${wallFinishColor}`}
+                ></div>
+                <span class="text-xs text-blue-700 flex-1">Click walls to paint</span>
+                <button class="text-blue-400 hover:text-blue-600 text-xs" onclick={clearWallPaint}>✕</button>
               </div>
-              <div class="text-left">
-                <div class="font-medium">Select <span class="text-gray-400 text-xs ml-1">V</span></div>
-                <div class="text-xs text-gray-400">Click to select elements</div>
+            {:else}
+              <p class="text-[10px] text-gray-400 px-1">Select a color or texture, then click a wall.</p>
+            {/if}
+
+            <!-- Color swatches -->
+            <div>
+              <p class="text-[10px] text-gray-400 mb-1.5 px-1">Colors</p>
+              <div class="grid grid-cols-7 gap-1 px-1">
+                {#each wallColors.filter(wc => !wc.texture) as wc}
+                  <button
+                    class="w-7 h-7 rounded-md border-2 transition-colors hover:scale-110 {wallFinishColor === wc.color && !wallFinishTexture ? 'border-blue-500 ring-1 ring-blue-200 scale-110' : 'border-gray-200 hover:border-gray-300'}"
+                    style="background-color: {wc.color}"
+                    title={wc.name}
+                    onclick={() => activateWallPaint(wc.color, null)}
+                  ></button>
+                {/each}
               </div>
-            </button>
-            <button
-              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'wall' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-              onclick={() => setTool('wall')}
-            >
-              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'wall' ? 'bg-blue-100' : ''}">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="8" rx="1"/><line x1="7" y1="8" x2="7" y2="16"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="17" y1="8" x2="17" y2="16"/></svg>
+            </div>
+
+            <!-- Texture swatches -->
+            <div>
+              <p class="text-[10px] text-gray-400 mb-1.5 px-1">Textures</p>
+              <div class="grid grid-cols-3 gap-1.5 px-1">
+                {#each wallColors.filter(wc => !!wc.texture) as wc}
+                  {@const texFile = ({ 'red-brick': 'brick', 'exposed-brick': 'exposed-brick', 'stone': 'stone', 'wood-panel': 'wood-panel', 'concrete-block': 'concrete', 'subway-tile': 'subway-tile' })[wc.id] ?? ''}
+                  <button
+                    class="rounded-lg border-2 h-14 flex flex-col items-end justify-end overflow-hidden relative transition-all duration-150 hover:scale-[1.03] {wallFinishTexture === wc.id ? 'border-blue-500 ring-1 ring-blue-200' : 'border-gray-200 hover:border-gray-300'}"
+                    style={texFile ? `background-image: url(/textures/${texFile}.jpg); background-size: cover; background-position: center` : `background-color: ${wc.color}30`}
+                    title={wc.name}
+                    onclick={() => activateWallPaint(wc.color, wc.id)}
+                  >
+                    <span class="bg-white/90 text-[9px] text-gray-900 px-1 py-0.5 rounded-tl leading-tight">{wc.name}</span>
+                  </button>
+                {/each}
               </div>
-              <div class="text-left">
-                <div class="font-medium">Draw Wall <span class="text-gray-400 text-xs ml-1">W</span></div>
-                <div class="text-xs text-gray-400">Click to draw, dbl-click to finish</div>
-              </div>
-            </button>
+            </div>
           </div>
         {/if}
 
         <!-- 2. Flooring -->
         <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => flooringOpen = !flooringOpen}>
-          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Flooring</span>
+          <span class="text-xs font-semibold text-gray-600">Flooring</span>
           <span class="text-gray-400 text-xs">{flooringOpen ? '▼' : '▶'}</span>
         </button>
         {#if flooringOpen}
-          <div class="pb-2 px-2">
-            <p class="text-xs text-gray-400 py-2">Select a room in the Design (3D) view to set floor materials.</p>
+          <div class="pb-2 px-1">
+            <p class="text-[10px] text-gray-400 mb-2 px-1">Select a room in 3D view, then pick a floor material.</p>
+            <div class="grid grid-cols-3 gap-1.5 px-1">
+              {#each floorMaterials as mat}
+                {@const texPath = floorTextures[mat.id]}
+                <button
+                  class="rounded-lg border-2 border-gray-200 hover:border-blue-400 h-16 flex flex-col items-end justify-end overflow-hidden relative transition-all duration-150 hover:scale-[1.03]"
+                  title={mat.name}
+                  style={texPath ? `background-image: url(${texPath}); background-size: cover; background-position: center` : `background-color: ${mat.color}`}
+                >
+                  <span class="bg-white/90 text-[9px] text-gray-900 px-1 py-0.5 rounded-tl leading-tight w-full text-center">{mat.name}</span>
+                </button>
+              {/each}
+            </div>
           </div>
         {/if}
 
         <!-- 3. Ceiling -->
         <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => ceilingOpen = !ceilingOpen}>
-          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Ceiling</span>
+          <span class="text-xs font-semibold text-gray-600">Ceiling</span>
           <span class="text-gray-400 text-xs">{ceilingOpen ? '▼' : '▶'}</span>
         </button>
         {#if ceilingOpen}
@@ -398,7 +639,7 @@
 
         <!-- 4. Opening (Door + Window) -->
         <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => openingOpen = !openingOpen}>
-          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Opening</span>
+          <span class="text-xs font-semibold text-gray-600">Opening</span>
           <span class="text-gray-400 text-xs">{openingOpen ? '▼' : '▶'}</span>
         </button>
         {#if openingOpen}
@@ -440,25 +681,63 @@
           </div>
         {/if}
 
-        <!-- 5. Structures (Staircase + Column) -->
+        </div>{/if}<!-- /archOpen -->
+
+        <!-- ═══ STRUCTURE ═══ -->
+        <button class="w-full flex items-center justify-between px-2 py-2.5 rounded-lg hover:bg-amber-50 group" onclick={() => structOpen = !structOpen}>
+          <div class="flex items-center gap-2">
+            <div class="w-1 h-4 rounded-full bg-amber-400 group-hover:bg-amber-500 transition-colors"></div>
+            <span class="text-xs font-bold uppercase tracking-widest text-amber-600">Structure</span>
+          </div>
+          <span class="text-amber-400 text-xs">{structOpen ? '▼' : '▶'}</span>
+        </button>
+
+        {#if structOpen}
+        <div class="pl-3 space-y-0.5 border-l-2 border-amber-100 ml-2 mb-1">
+
+        <!-- Staircase -->
         <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => structuresOpen = !structuresOpen}>
-          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Structures</span>
+          <span class="text-xs font-semibold text-gray-600">Staircase</span>
           <span class="text-gray-400 text-xs">{structuresOpen ? '▼' : '▶'}</span>
         </button>
         {#if structuresOpen}
           <div class="space-y-1 pb-2">
-            <button
-              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {isPlacingStair ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-              onclick={onPlaceStair}
-            >
-              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {isPlacingStair ? 'bg-blue-100' : ''}">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 5h-5V2h-3v6h-4V5H7v6H2v3h5v3h3v-3h4v3h3v-6h5z"/></svg>
-              </div>
-              <div class="text-left">
-                <div class="font-medium">Staircase</div>
-                <div class="text-xs text-gray-400">Click to place stairs</div>
-              </div>
-            </button>
+            <div class="flex gap-2">
+              <button
+                class="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors {isPlacingStair ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
+                onclick={onPlaceStair}
+              >
+                <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center shrink-0">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 5h-5V2h-3v6h-4V5H7v6H2v3h5v3h3v-3h4v3h3v-6h5z"/></svg>
+                </div>
+                <div class="text-left">
+                  <div class="font-medium text-xs">Staircase</div>
+                  <div class="text-xs text-gray-400">Straight</div>
+                </div>
+              </button>
+              <button
+                class="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors hover:bg-gray-50 text-gray-700"
+                onclick={() => { placingStairType.set('spiral'); placingStair.set(true); }}
+              >
+                <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center shrink-0">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a9 9 0 0 1 9 9"/><path d="M12 6a6 6 0 0 1 6 6"/><path d="M12 9a3 3 0 0 1 3 3"/><circle cx="12" cy="21" r="1"/></svg>
+                </div>
+                <div class="text-left">
+                  <div class="font-medium text-xs">Spiral Stair</div>
+                  <div class="text-xs text-gray-400">Cylindrical</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        {/if}
+
+        <!-- Column -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => columnsOpen = !columnsOpen}>
+          <span class="text-xs font-semibold text-gray-600">Column</span>
+          <span class="text-gray-400 text-xs">{columnsOpen ? '▼' : '▶'}</span>
+        </button>
+        {#if columnsOpen}
+          <div class="space-y-1 pb-2">
             <div class="flex gap-2">
               <button
                 class="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors {isPlacingColumn ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
@@ -482,9 +761,43 @@
           </div>
         {/if}
 
-        <!-- 6. Room -->
+        <!-- Post (stub) -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50 opacity-50" title="Coming soon">
+          <span class="text-xs font-semibold text-gray-500">Post</span>
+          <span class="text-[10px] text-gray-300 bg-gray-100 px-1.5 rounded">soon</span>
+        </button>
+
+        <!-- Flooring Structure / Foundation (stub) -->
+        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50 opacity-50" title="Coming soon">
+          <span class="text-xs font-semibold text-gray-500">Foundation</span>
+          <span class="text-[10px] text-gray-300 bg-gray-100 px-1.5 rounded">soon</span>
+        </button>
+
+        </div>{/if}<!-- /structOpen -->
+
+        <!-- ═══ MEP ═══ -->
+        <button class="w-full flex items-center justify-between px-2 py-2.5 rounded-lg hover:bg-emerald-50 group" onclick={() => mepOpen = !mepOpen}>
+          <div class="flex items-center gap-2">
+            <div class="w-1 h-4 rounded-full bg-emerald-400 group-hover:bg-emerald-500 transition-colors"></div>
+            <span class="text-xs font-bold uppercase tracking-widest text-emerald-600">MEP</span>
+          </div>
+          <span class="text-emerald-400 text-xs">{mepOpen ? '▼' : '▶'}</span>
+        </button>
+
+        {#if mepOpen}
+        <div class="pl-3 space-y-0.5 border-l-2 border-emerald-100 ml-2 mb-1">
+          {#each ['Lighting', 'Clean Water', 'Waste Water', 'HVAC'] as mepItem}
+            <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50 opacity-50" title="Coming soon">
+              <span class="text-xs font-semibold text-gray-500">{mepItem}</span>
+              <span class="text-[10px] text-gray-300 bg-gray-100 px-1.5 rounded">soon</span>
+            </button>
+          {/each}
+        </div>{/if}<!-- /mepOpen -->
+
+        <!-- Room (outside AEC groups — layout tool) -->
+        <div class="border-t border-gray-100 mt-1 pt-1">
         <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => roomOpen = !roomOpen}>
-          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Room</span>
+          <span class="text-xs font-semibold text-gray-600">Room presets</span>
           <span class="text-gray-400 text-xs">{roomOpen ? '▼' : '▶'}</span>
         </button>
         {#if roomOpen}
@@ -529,86 +842,62 @@
             </div>
           </div>
         {/if}
+        </div><!-- /room section -->
 
-        <!-- Annotation -->
-        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => annotateOpen = !annotateOpen}>
-          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Annotation</span>
-          <span class="text-gray-400 text-xs">{annotateOpen ? '▼' : '▶'}</span>
-        </button>
-        {#if annotateOpen}
-          <div class="space-y-1 pb-2">
-            <button
-              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'text' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-              onclick={() => setTool('text')}
-            >
-              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'text' ? 'bg-blue-100' : ''}">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="8" y1="20" x2="16" y2="20"/></svg>
-              </div>
-              <div class="text-left">
-                <div class="font-medium">Text Label</div>
-                <div class="text-xs text-gray-400">Add text annotations (T)</div>
-              </div>
-            </button>
-            <button
-              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'annotate' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-              onclick={() => setTool('annotate')}
-            >
-              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'annotate' ? 'bg-blue-100' : ''}">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><line x1="16" y1="5" x2="22" y2="5"/><line x1="19" y1="2" x2="19" y2="8"/><line x1="3" y1="12" x2="12" y2="12"/></svg>
-              </div>
-              <div class="text-left">
-                <div class="font-medium">Dimension</div>
-                <div class="text-xs text-gray-400">Add dimension annotations (N)</div>
-              </div>
-            </button>
-            <button
-              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors {currentTool === 'measure' ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
-              onclick={() => setTool('measure')}
-            >
-              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {currentTool === 'measure' ? 'bg-blue-100' : ''}">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h5l2-7 4 14 2-7h7"/></svg>
-              </div>
-              <div class="text-left">
-                <div class="font-medium">Measure</div>
-                <div class="text-xs text-gray-400">Measure distances (M)</div>
-              </div>
-            </button>
+        <!-- ═══ CONSTRUCTION DETAILS ═══ -->
+        <div class="border-t border-gray-100 mt-1 pt-1">
+        <button class="w-full flex items-center justify-between px-2 py-2.5 rounded-lg hover:bg-violet-50 group" onclick={() => detailsOpen = !detailsOpen}>
+          <div class="flex items-center gap-2">
+            <div class="w-1 h-4 rounded-full bg-violet-400 group-hover:bg-violet-500 transition-colors"></div>
+            <span class="text-xs font-bold uppercase tracking-widest text-violet-600">Details</span>
           </div>
-        {/if}
+          <span class="text-violet-400 text-xs">{detailsOpen ? '▼' : '▶'}</span>
+        </button>
 
-        <!-- Import -->
-        <button class="w-full flex items-center justify-between px-2 py-2 rounded-lg hover:bg-gray-50" onclick={() => importOpen = !importOpen}>
-          <span class="text-xs font-bold uppercase tracking-wide text-gray-600">Import</span>
-          <span class="text-gray-400 text-xs">{importOpen ? '▼' : '▶'}</span>
-        </button>
-        {#if importOpen}
-          <div class="space-y-1 pb-2">
-            <button
-              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors hover:bg-gray-50 text-gray-700"
-              onclick={onImportImage}
-            >
-              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
-              </div>
-              <div class="text-left">
-                <div class="font-medium">Import Image</div>
-                <div class="text-xs text-gray-400">Floor plan background</div>
-              </div>
+        {#if detailsOpen}
+        <div class="pl-3 space-y-0.5 border-l-2 border-violet-100 ml-2 mb-1">
+          {#if currentPlacingDetailId}
+            <div class="flex items-center justify-between px-2 py-1.5 rounded-lg bg-violet-50 border border-violet-200 text-xs text-violet-700 mb-1">
+              <span>Click on a wall to place</span>
+              <button onclick={() => placingDetailId.set(null)} class="text-violet-400 hover:text-violet-700 font-bold">✕</button>
+            </div>
+          {/if}
+          {#each detailCategories as cat}
+            <!-- Sub-group header -->
+            <button class="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-gray-50 mt-1"
+              onclick={() => detailSubOpen[cat.label] = !detailSubOpen[cat.label]}>
+              <span class="text-[10px] font-bold uppercase tracking-widest text-gray-500">{cat.label}</span>
+              <span class="text-gray-400 text-[10px]">{detailSubOpen[cat.label] ? '▼' : '▶'}</span>
             </button>
-            <button
-              class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors hover:bg-gray-50 text-gray-700"
-              onclick={onImportRoomPlan}
-            >
-              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-              </div>
-              <div class="text-left">
-                <div class="font-medium">Import RoomPlan</div>
-                <div class="text-xs text-gray-400">iOS LiDAR scan (.json/.zip)</div>
-              </div>
-            </button>
-          </div>
-        {/if}
+            {#if detailSubOpen[cat.label]}
+              {#each cat.subcategories as sub}
+                {@const items = detailCatalog.filter(d => d.category === cat.label && d.subcategory === sub)}
+                {#if items.length}
+                  <p class="text-[9px] uppercase tracking-wider text-gray-400 px-2 pt-1.5">{sub}</p>
+                  {#each items as detail}
+                    <button
+                      class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition-colors {currentPlacingDetailId === detail.id ? 'bg-violet-50 border border-violet-300 text-violet-700' : 'hover:bg-gray-50 text-gray-700 border border-transparent'}"
+                      onclick={() => { placingDetailId.set(currentPlacingDetailId === detail.id ? null : detail.id); }}
+                    >
+                      <!-- Layer color swatches (first 4) -->
+                      <div class="flex gap-0.5 shrink-0">
+                        {#each detail.layers.slice(0, 4) as l}
+                          <div class="w-2.5 h-7 rounded-sm border border-black/10" style="background:{l.color}"></div>
+                        {/each}
+                      </div>
+                      <div class="text-left min-w-0">
+                        <div class="font-medium leading-tight truncate">{detail.name}</div>
+                        <div class="text-[10px] text-gray-400 leading-tight">{detail.layers.length} layers · {detail.layers.reduce((s, l) => s + l.thickness, 0).toFixed(0)} cm</div>
+                      </div>
+                    </button>
+                  {/each}
+                {/if}
+              {/each}
+            {/if}
+          {/each}
+        </div>{/if}<!-- /detailsOpen -->
+        </div><!-- /details section -->
+
       </div>
 
     {:else if activeTab === 'furniture'}
@@ -732,9 +1021,89 @@
           {/each}
         </div>
       </div>
+    {:else if activeTab === 'entourage'}
+      <div class="flex flex-col gap-2 py-2">
+
+        <!-- Plan / Elevation filter -->
+        <div class="flex gap-1 px-3">
+          <button
+            class="flex-1 py-1 text-xs rounded {entourageViewFilter === 'plan' ? 'bg-blue-100 text-blue-700 font-medium' : 'bg-slate-100 text-slate-500'}"
+            onclick={() => entourageViewFilter = 'plan'}
+          >Plan</button>
+          <button
+            class="flex-1 py-1 text-xs rounded {entourageViewFilter === 'elevation' ? 'bg-blue-100 text-blue-700 font-medium' : 'bg-slate-100 text-slate-500'}"
+            onclick={() => entourageViewFilter = 'elevation'}
+          >Elevation</button>
+        </div>
+
+        <!-- Category accordions -->
+        {#each entourageCategories as group}
+          {@const visibleDefs = [
+            ...entourageCatalog.filter(d => d.category === group.category && d.viewType === entourageViewFilter),
+            ...$customEntourage.filter(d => d.category === group.category && d.viewType === entourageViewFilter),
+          ]}
+          {#if visibleDefs.length > 0}
+            <div class="px-3">
+              <button
+                class="w-full flex items-center justify-between py-1 text-xs font-semibold text-slate-600 uppercase tracking-wide"
+                onclick={() => entourageCategoryOpen[group.category] = !entourageCategoryOpen[group.category]}
+              >
+                {group.label}
+                <span class="text-slate-400">{entourageCategoryOpen[group.category] ? '−' : '+'}</span>
+              </button>
+              {#if entourageCategoryOpen[group.category]}
+                <div class="grid grid-cols-2 gap-2 mt-1 mb-2">
+                  {#each visibleDefs as def}
+                    <button
+                      class="relative flex flex-col items-center gap-1 p-2 rounded border text-xs text-slate-600 transition-colors {currentPlacingEntourageId === def.id ? 'border-blue-400 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'}"
+                      onclick={() => {
+                        placingEntourageDefId.set(currentPlacingEntourageId === def.id ? null : def.id);
+                      }}
+                      title={def.name}
+                    >
+                      <!-- Thumbnail -->
+                      <div class="w-full h-10 flex items-center justify-center overflow-hidden">
+                        {#if def.source === 'builtin'}
+                          <svg viewBox={(def as EntourageDef).viewBox} class="max-w-full max-h-full" style="width:100%;height:40px">
+                            <path d={(def as EntourageDef).svgPath} fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
+                          </svg>
+                        {:else}
+                          <img src={(def as CustomEntourageDef).imageDataUrl} alt={def.name} class="max-w-full max-h-full object-contain" />
+                        {/if}
+                      </div>
+                      <span class="text-center leading-tight line-clamp-2">{def.name}</span>
+                      {#if def.source === 'custom'}
+                        <span class="absolute top-1 right-1 text-[9px] bg-slate-200 text-slate-500 rounded px-1">custom</span>
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
+        {/each}
+
+        <!-- Upload custom -->
+        <div class="px-3 pt-1 border-t border-slate-100 mt-1">
+          <button
+            class="w-full py-1.5 text-xs text-slate-500 hover:text-slate-700 border border-dashed border-slate-300 hover:border-slate-400 rounded transition-colors"
+            onclick={() => showEntourageUpload = true}
+          >
+            + Upload custom…
+          </button>
+        </div>
+
+      </div>
     {/if}
   </div>
 </div>
+
+{#if showEntourageUpload}
+  <EntourageUploadDialog
+    onSave={(def: CustomEntourageDef) => { addCustomEntourage(def); showEntourageUpload = false; }}
+    onClose={() => showEntourageUpload = false}
+  />
+{/if}
 
 <!-- Furniture Hover Preview Tooltip -->
 {#if showPreview && hoveredItem}
@@ -764,6 +1133,59 @@
         <div class="text-xs text-gray-500">
           {item.width} × {item.depth} × {item.height} cm
         </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- DXF XRef Link Dialog -->
+{#if xrefDxfDialog}
+  <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" onclick={() => xrefDxfDialog = false}>
+    <div class="bg-white rounded-xl shadow-2xl w-80 p-5 space-y-3" onclick={(e) => e.stopPropagation()}>
+      <h3 class="text-sm font-bold text-gray-800">Link DXF File</h3>
+      <label class="block">
+        <span class="text-xs text-gray-500">Name</span>
+        <input type="text" bind:value={xrefDxfName} class="w-full mt-0.5 px-2 py-1.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-200 outline-none" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-gray-500">Unit scale (DXF → cm)</span>
+        <select bind:value={xrefDxfScale} class="w-full mt-0.5 px-2 py-1.5 border border-gray-200 rounded-lg text-sm">
+          <option value={0.1}>Millimeters (×0.1)</option>
+          <option value={1}>Centimeters (×1)</option>
+          <option value={2.54}>Inches (×2.54)</option>
+          <option value={100}>Meters (×100)</option>
+        </select>
+      </label>
+      <div class="flex gap-2 pt-1">
+        <button onclick={() => xrefDxfDialog = false} class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors">Cancel</button>
+        <button onclick={confirmLinkDxf} class="flex-1 px-3 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600 transition-colors">Link</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Native .carpentra XRef Link Dialog -->
+{#if xrefNativeDialog}
+  <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" onclick={() => xrefNativeDialog = false}>
+    <div class="bg-white rounded-xl shadow-2xl w-80 p-5 space-y-3" onclick={(e) => e.stopPropagation()}>
+      <h3 class="text-sm font-bold text-gray-800">Link .carpentra Project</h3>
+      <label class="block">
+        <span class="text-xs text-gray-500">Name</span>
+        <input type="text" bind:value={xrefNativeName} class="w-full mt-0.5 px-2 py-1.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-200 outline-none" />
+      </label>
+      {#if xrefNativeFloorOptions.length > 1}
+        <label class="block">
+          <span class="text-xs text-gray-500">Floor to reference</span>
+          <select bind:value={xrefNativeFloorIndex} class="w-full mt-0.5 px-2 py-1.5 border border-gray-200 rounded-lg text-sm">
+            {#each xrefNativeFloorOptions as opt}
+              <option value={opt.index}>{opt.label}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+      <div class="flex gap-2 pt-1">
+        <button onclick={() => xrefNativeDialog = false} class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 transition-colors">Cancel</button>
+        <button onclick={confirmLinkNative} class="flex-1 px-3 py-2 bg-purple-500 text-white rounded-lg text-sm font-medium hover:bg-purple-600 transition-colors">Link</button>
       </div>
     </div>
   </div>
