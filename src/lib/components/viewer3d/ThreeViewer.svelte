@@ -2296,7 +2296,7 @@
   function enterFocusMode(objectId: string, commentText: string) {
     if (!scene || !camera) return;
 
-    // Find the target object — search by named IDs then by uuid
+    // Find target object by named ID then by uuid
     let targetObj: THREE.Object3D | null = null;
     scene.traverse((obj: any) => {
       if (targetObj) return;
@@ -2305,42 +2305,49 @@
       else if ((obj as THREE.Mesh).isMesh && obj.uuid === objectId) targetObj = obj;
     });
 
-    // Dim all meshes to 30% (70% dark) and save originals
+    // Collect UUIDs of every mesh that belongs to the target object tree
+    const targetUUIDs = new Set<string>();
+    if (targetObj) {
+      const collect = (o: THREE.Object3D) => {
+        if ((o as THREE.Mesh).isMesh) targetUUIDs.add(o.uuid);
+        o.children.forEach(collect);
+      };
+      collect(targetObj);
+    }
+
+    // Save and transform every mesh in the scene
     meshOriginalOpacity.clear();
     scene.traverse((obj: any) => {
       if (!(obj as THREE.Mesh).isMesh) return;
       const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
       if (!mat) return;
-      meshOriginalOpacity.set(obj.uuid, { opacity: mat.opacity, transparent: mat.transparent });
-      if (obj !== targetObj) {
+
+      meshOriginalOpacity.set(obj.uuid, {
+        opacity:           mat.opacity,
+        transparent:       mat.transparent,
+        color:             mat.color.clone(),
+        emissive:          (mat.emissive ?? new THREE.Color(0)).clone(),
+        emissiveIntensity: mat.emissiveIntensity ?? 0,
+        wireframe:         (mat as any).wireframe ?? false,
+      });
+
+      if (targetUUIDs.has(obj.uuid)) {
+        // Highlighted object: swap to corporate coral
+        mat.color.copy(HIGHLIGHT_COLOR);
+        mat.emissive.copy(HIGHLIGHT_EMISSIVE);
+        mat.emissiveIntensity = HIGHLIGHT_EMISSIVE_I;
+      } else if (obj.userData?.wallId) {
+        // Wall meshes: wireframe so room structure stays readable
+        (mat as any).wireframe = true;
+      } else {
+        // Everything else: moderate dim
         mat.transparent = true;
-        mat.opacity = 0.15;
-        mat.needsUpdate = true;
+        mat.opacity = DIM_OPACITY;
       }
+      mat.needsUpdate = true;
     });
 
-    // Apply indigo emissive glow to the focused object (or its mesh children)
-    if (targetObj) {
-      const applyEmissive = (obj: THREE.Object3D) => {
-        if ((obj as THREE.Mesh).isMesh) {
-          const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
-          if (mat && mat.emissive !== undefined) {
-            // Store original emissive intensity under uuid + '_emissive' key
-            meshOriginalOpacity.set(obj.uuid + '_emissive', {
-              opacity: mat.emissiveIntensity ?? 0,
-              transparent: false,
-            });
-            mat.emissive = new THREE.Color(0x4f46e5); // indigo
-            mat.emissiveIntensity = 0.35;
-            mat.needsUpdate = true;
-          }
-        }
-        obj.children.forEach(applyEmissive);
-      };
-      applyEmissive(targetObj);
-    }
-
-    // Zoom camera toward the object
+    // Fly camera toward the highlighted object
     if (targetObj) {
       preFocusCameraPos = camera.position.clone();
       preFocusTarget = controls.target.clone();
@@ -2361,25 +2368,20 @@
   }
 
   function exitFocusMode() {
-    // Restore mesh opacities and emissive values
+    // Restore every mesh to its saved state
     scene.traverse((obj: any) => {
       if (!(obj as THREE.Mesh).isMesh) return;
       const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
       if (!mat) return;
-
       const saved = meshOriginalOpacity.get(obj.uuid);
-      if (saved) {
-        mat.opacity = saved.opacity;
-        mat.transparent = saved.transparent;
-        mat.needsUpdate = true;
-      }
-
-      const savedEmissive = meshOriginalOpacity.get(obj.uuid + '_emissive');
-      if (savedEmissive && mat.emissive !== undefined) {
-        mat.emissive = new THREE.Color(0x000000);
-        mat.emissiveIntensity = savedEmissive.opacity;
-        mat.needsUpdate = true;
-      }
+      if (!saved) return;
+      mat.color.copy(saved.color);
+      if (mat.emissive !== undefined) mat.emissive.copy(saved.emissive);
+      mat.emissiveIntensity = saved.emissiveIntensity;
+      mat.opacity           = saved.opacity;
+      mat.transparent       = saved.transparent;
+      (mat as any).wireframe = saved.wireframe;
+      mat.needsUpdate = true;
     });
     meshOriginalOpacity.clear();
 
@@ -2392,7 +2394,6 @@
       preFocusTarget = null;
     }
 
-    // Clear hover outline too
     if (collabHoverOutline) { scene.remove(collabHoverOutline); collabHoverOutline = null; }
     collabHoveredObjectId = null;
 
