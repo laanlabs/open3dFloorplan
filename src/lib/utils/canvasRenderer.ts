@@ -3,7 +3,7 @@
  * All functions are pure — they take canvas context + data and render.
  * Extracted from FloorPlanCanvas.svelte.
  */
-import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, Floor, Annotation } from '$lib/models/types';
+import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, Floor, Annotation, DrivenAnnotation, WallDetailAttachment, EntourageItem, EntourageDef, CustomEntourageDef } from '$lib/models/types';
 import type { Room } from '$lib/models/types';
 import type { CanvasState } from '$lib/utils/canvasInteraction';
 import type { ProjectSettings } from '$lib/stores/settings';
@@ -1533,4 +1533,520 @@ export function drawMinimap(
   mctx.strokeRect(vtl.x, vtl.y, vw, vh);
 
   mctx.strokeStyle = '#cbd5e1'; mctx.lineWidth = 1; mctx.strokeRect(0, 0, mw, mh);
+}
+
+// ── Detail Callout Bubbles ────────────────────────────────────────────────────
+
+export function drawDetailCallouts(
+  cs: CanvasState,
+  floor: Floor,
+  selectedCalloutId: string | null
+): void {
+  if (!floor.wallDetailAttachments?.length) return;
+  const { ctx, zoom } = cs;
+
+  for (const att of floor.wallDetailAttachments) {
+    const wall = floor.walls.find(w => w.id === att.wallId);
+    if (!wall) continue;
+
+    // Compute attachment point on wall
+    const wx = wall.start.x + (wall.end.x - wall.start.x) * att.position;
+    const wy = wall.start.y + (wall.end.y - wall.start.y) * att.position;
+
+    // Perpendicular direction to offset the bubble
+    const wdx = wall.end.x - wall.start.x, wdy = wall.end.y - wall.start.y;
+    const wlen = Math.hypot(wdx, wdy) || 1;
+    const nx = -wdy / wlen, ny = wdx / wlen;
+    const bubbleOffset = 60; // world units
+
+    const bx = wx + nx * bubbleOffset;
+    const by = wy + ny * bubbleOffset;
+
+    const sp = wts(cs, wx, wy);
+    const sb = wts(cs, bx, by);
+    const selected = att.id === selectedCalloutId;
+
+    // Leader line
+    ctx.strokeStyle = selected ? '#1d4ed8' : '#374151';
+    ctx.lineWidth = selected ? 1.5 : 1;
+    ctx.setLineDash([4 * zoom, 2 * zoom]);
+    ctx.beginPath(); ctx.moveTo(sp.x, sp.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Dot at wall attachment
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath(); ctx.arc(sp.x, sp.y, Math.max(3, 3.5 * zoom), 0, Math.PI * 2); ctx.fill();
+
+    // Callout circle
+    const r = Math.max(12, 14 * zoom);
+    ctx.fillStyle = selected ? '#1d4ed8' : '#1e293b';
+    ctx.beginPath(); ctx.arc(sb.x, sb.y, r, 0, Math.PI * 2); ctx.fill();
+
+    // Callout number
+    const fontSize = Math.max(9, 10 * zoom);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `700 ${fontSize}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(att.calloutNumber), sb.x, sb.y);
+  }
+}
+
+// ── Driven Annotations (parametric dimensions) ────────────────────────────────
+
+function drawPadlock(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number, color: string) {
+  const bw = size * 0.7, bh = size * 0.5;
+  const bx = cx - bw / 2, by = cy;
+  ctx.strokeStyle = color; ctx.fillStyle = color;
+  // Body
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, bh, size * 0.08);
+  ctx.fill();
+  // Shackle
+  ctx.beginPath();
+  ctx.lineWidth = size * 0.15;
+  ctx.arc(cx, by, bw * 0.28, Math.PI, 0);
+  ctx.strokeStyle = color; ctx.stroke();
+  // Keyhole circle
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.beginPath(); ctx.arc(cx, by + bh * 0.4, size * 0.1, 0, Math.PI * 2); ctx.fill();
+}
+
+export function drawDrivenAnnotation(
+  cs: CanvasState,
+  a: DrivenAnnotation,
+  selected: boolean,
+  dimSettings: ProjectSettings
+): void {
+  const { ctx, zoom } = cs;
+  const offset = a.offset || 40;
+  const dx = a.x2 - a.x1, dy = a.y2 - a.y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 1) return;
+
+  const ux = dx / len, uy = dy / len;
+  const nx = -uy, ny = ux;
+
+  const d1x = a.x1 + nx * offset, d1y = a.y1 + ny * offset;
+  const d2x = a.x2 + nx * offset, d2y = a.y2 + ny * offset;
+
+  const s1 = wts(cs, a.x1, a.y1);
+  const s2 = wts(cs, a.x2, a.y2);
+  const sd1 = wts(cs, d1x, d1y);
+  const sd2 = wts(cs, d2x, d2y);
+
+  const color = selected ? '#ea580c' : '#f97316'; // orange
+  const extBeyond = 4 * zoom;
+
+  ctx.strokeStyle = color; ctx.lineWidth = 0.75;
+  ctx.beginPath();
+  ctx.moveTo(s1.x, s1.y); ctx.lineTo(sd1.x + nx * extBeyond * zoom, sd1.y + ny * extBeyond * zoom);
+  ctx.moveTo(s2.x, s2.y); ctx.lineTo(sd2.x + nx * extBeyond * zoom, sd2.y + ny * extBeyond * zoom);
+  ctx.stroke();
+
+  const dimMx = (sd1.x + sd2.x) / 2;
+  const dimMy = (sd1.y + sd2.y) / 2;
+
+  const dist = Math.hypot(a.x2 - a.x1, a.y2 - a.y1);
+  const label = a.label || formatLength(dist, dimSettings.units);
+  const fontSize = Math.max(10, 11 * zoom);
+  ctx.font = `600 ${fontSize}px sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const textW = ctx.measureText(label).width;
+  const halfGap = textW / 2 + 4 + fontSize * 0.8;
+
+  const sux = (sd2.x - sd1.x) / Math.hypot(sd2.x - sd1.x, sd2.y - sd1.y) || 0;
+  const suy = (sd2.y - sd1.y) / Math.hypot(sd2.x - sd1.x, sd2.y - sd1.y) || 0;
+  ctx.strokeStyle = color; ctx.lineWidth = selected ? 1.5 : 1;
+  ctx.beginPath();
+  ctx.moveTo(sd1.x, sd1.y); ctx.lineTo(dimMx - sux * halfGap, dimMy - suy * halfGap);
+  ctx.moveTo(dimMx + sux * halfGap, dimMy + suy * halfGap); ctx.lineTo(sd2.x, sd2.y);
+  ctx.stroke();
+
+  const arrowLen = Math.max(6, 7 * zoom);
+  const arrowW = Math.max(2.5, 3 * zoom);
+  ctx.fillStyle = color;
+  for (const [px, py, dir] of [[sd1.x, sd1.y, 1], [sd2.x, sd2.y, -1]] as [number, number, number][]) {
+    const adx = sux * arrowLen * dir, ady = suy * arrowLen * dir;
+    const apx = -suy * arrowW, apy = sux * arrowW;
+    ctx.beginPath(); ctx.moveTo(px, py);
+    ctx.lineTo(px + adx + apx, py + ady + apy);
+    ctx.lineTo(px + adx - apx, py + ady - apy);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // Label background pill
+  const labelPadX = 4, labelPadY = 2;
+  const pillW = textW + labelPadX * 2;
+  const pillH = fontSize + labelPadY * 2;
+  ctx.fillStyle = selected ? '#fff7ed' : 'rgba(255,247,237,0.92)';
+  ctx.beginPath();
+  ctx.roundRect(dimMx - pillW / 2, dimMy - pillH / 2, pillW, pillH, pillH / 2);
+  ctx.fill();
+  ctx.strokeStyle = color; ctx.lineWidth = selected ? 1.5 : 1;
+  ctx.stroke();
+
+  ctx.fillStyle = color;
+  ctx.fillText(label, dimMx, dimMy);
+
+  // Padlock icon to the right of the label
+  const lockSize = Math.max(7, 8 * zoom);
+  const lockX = dimMx + pillW / 2 + lockSize * 0.7;
+  const lockY = dimMy - lockSize * 0.5;
+  drawPadlock(ctx, lockX, lockY, lockSize, color);
+
+  if (selected) {
+    for (const p of [s1, s2]) {
+      ctx.fillStyle = color; ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
+export function drawDrivenAnnotations(
+  cs: CanvasState,
+  floor: Floor,
+  selectedDrivenAnnotationId: string | null,
+  dimSettings: ProjectSettings
+): void {
+  if (!floor.drivenAnnotations?.length) return;
+  for (const a of floor.drivenAnnotations) {
+    drawDrivenAnnotation(cs, a, a.id === selectedDrivenAnnotationId, dimSettings);
+  }
+}
+
+// ── Precision snap overlay helpers ──────────────────────────────────
+
+type SnapIndicatorType = 'endpoint' | 'midpoint' | 'wall' | 'obj-corner' | 'obj-mid' | 'obj-center' | 'grid';
+
+const SNAP_COLORS: Record<SnapIndicatorType, string> = {
+  endpoint:   '#22c55e',
+  midpoint:   '#f97316',
+  wall:       '#3b82f6',
+  'obj-corner': '#8b5cf6',
+  'obj-mid':  '#8b5cf6',
+  'obj-center': '#8b5cf6',
+  grid:       '#9ca3af',
+};
+
+/** Draw a type-specific icon at a snapped world position. */
+export function drawSnapIndicator(cs: CanvasState, type: SnapIndicatorType, wx: number, wy: number): void {
+  const { ctx, zoom } = cs;
+  const { x, y } = wts(cs, wx, wy);
+  const color = SNAP_COLORS[type] ?? '#9ca3af';
+  const r = 6;
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.5;
+
+  if (type === 'endpoint') {
+    // Green filled triangle
+    ctx.beginPath();
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x + r * 0.87, y + r * 0.5);
+    ctx.lineTo(x - r * 0.87, y + r * 0.5);
+    ctx.closePath();
+    ctx.fill();
+  } else if (type === 'midpoint') {
+    // Orange filled square
+    const s = r * 0.85;
+    ctx.fillRect(x - s, y - s, s * 2, s * 2);
+  } else if (type === 'wall') {
+    // Blue perpendicular tick ⊥
+    ctx.beginPath();
+    ctx.moveTo(x - r, y); ctx.lineTo(x + r, y);
+    ctx.moveTo(x, y); ctx.lineTo(x, y - r * 1.4);
+    ctx.stroke();
+  } else if (type === 'obj-corner') {
+    // Violet outlined square with center dot
+    const s = r * 0.9;
+    ctx.strokeRect(x - s, y - s, s * 2, s * 2);
+    ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
+  } else if (type === 'obj-mid') {
+    // Violet diamond ◇
+    ctx.beginPath();
+    ctx.moveTo(x, y - r); ctx.lineTo(x + r, y);
+    ctx.lineTo(x, y + r); ctx.lineTo(x - r, y);
+    ctx.closePath(); ctx.stroke();
+  } else if (type === 'obj-center') {
+    // Violet crosshair +
+    ctx.beginPath();
+    ctx.moveTo(x - r, y); ctx.lineTo(x + r, y);
+    ctx.moveTo(x, y - r); ctx.lineTo(x, y + r);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+  } else {
+    // Gray dot for grid
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Outer ring for emphasis
+  if (type !== 'grid') {
+    ctx.globalAlpha = 0.35;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(x, y, r + 4, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
+/** Draw a faint pre-snap ring around an approaching candidate (world coords). */
+export function drawApproachingCandidate(cs: CanvasState, wx: number, wy: number, type: SnapIndicatorType): void {
+  const { ctx } = cs;
+  const { x, y } = wts(cs, wx, wy);
+  const color = SNAP_COLORS[type] ?? '#9ca3af';
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.22;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.arc(x, y, 12, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+/** Draw a Δx / Δy displacement tooltip near the cursor. */
+export function drawDragTooltip(
+  cs: CanvasState,
+  cursorScreenX: number,
+  cursorScreenY: number,
+  dx: number,
+  dy: number,
+  constrainAxis: 'x' | 'y' | null,
+  units: string,
+): void {
+  const { ctx } = cs;
+  const factor = units === 'imperial' ? 0.0328084 : 0.01; // cm → ft or m
+  const unitLabel = units === 'imperial' ? 'ft' : 'm';
+  const fmt = (v: number) => (v * factor).toFixed(2);
+
+  let text: string;
+  if (constrainAxis === 'x') {
+    text = `→ ${fmt(Math.abs(dx))} ${unitLabel}`;
+  } else if (constrainAxis === 'y') {
+    text = `↑ ${fmt(Math.abs(dy))} ${unitLabel}`;
+  } else {
+    text = `→ ${fmt(Math.abs(dx))}  ↑ ${fmt(Math.abs(dy))} ${unitLabel}`;
+  }
+
+  ctx.save();
+  ctx.font = 'bold 11px system-ui, sans-serif';
+  const tw = ctx.measureText(text).width;
+  const pw = tw + 14, ph = 20;
+  const tx = cursorScreenX + 16;
+  const ty = cursorScreenY - 28;
+
+  ctx.fillStyle = '#1e293b';
+  ctx.globalAlpha = 0.88;
+  ctx.beginPath();
+  ctx.roundRect(tx, ty - ph / 2, pw, ph, 5);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#f1f5f9';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, tx + 7, ty);
+  ctx.restore();
+}
+
+/** Draw axis rail (X = red horizontal, Y = green vertical) through a world-space origin. */
+export function drawAxisRail(cs: CanvasState, axis: 'x' | 'y', originWx: number, originWy: number): void {
+  const { ctx, width, height } = cs;
+  const origin = wts(cs, originWx, originWy);
+  ctx.save();
+  ctx.strokeStyle = axis === 'x' ? '#ef4444' : '#22c55e';
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.55;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  if (axis === 'x') {
+    ctx.moveTo(0, origin.y); ctx.lineTo(width, origin.y);
+  } else {
+    ctx.moveTo(origin.x, 0); ctx.lineTo(origin.x, height);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+/** Draw blue diamond grip indicators at the 9 standard grip positions on a furniture item. */
+export function drawGripDots(cs: CanvasState, item: FurnitureItem, hoveredGripType: SnapIndicatorType | null): void {
+  const { ctx, zoom } = cs;
+  const cat = getCatalogItem(item.catalogId);
+  if (!cat) return;
+  const hw = (item.width ?? cat.width) * Math.abs(item.scale?.x ?? 1) / 2;
+  const hd = (item.depth ?? cat.depth) * Math.abs(item.scale?.y ?? 1) / 2;
+  const angle = (item.rotation * Math.PI) / 180;
+  const s = wts(cs, item.position.x, item.position.y);
+
+  const localGrips: [number, number, SnapIndicatorType][] = [
+    [-hw, -hd, 'obj-corner'], [0, -hd, 'obj-mid'], [hw, -hd, 'obj-corner'],
+    [-hw, 0,   'obj-mid'],    [0, 0,   'obj-center'], [hw, 0, 'obj-mid'],
+    [-hw, hd,  'obj-corner'], [0, hd,  'obj-mid'], [hw, hd, 'obj-corner'],
+  ];
+
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.rotate(angle);
+  for (const [lx, ly, gtype] of localGrips) {
+    const sx = lx * zoom;
+    const sy = ly * zoom;
+    const isHovered = false; // hover detection is handled via cursor proximity — visual is static
+    const r = 4.5;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - r); ctx.lineTo(sx + r, sy);
+    ctx.lineTo(sx, sy + r); ctx.lineTo(sx - r, sy);
+    ctx.closePath();
+    ctx.fillStyle = gtype === 'obj-center' ? '#3b82f6' : '#8b5cf6';
+    ctx.globalAlpha = 0.7;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ── Entourage rendering ─────────────────────────────────────────────────────
+
+/**
+ * Parse viewBox string "0 0 W H" into [x, y, w, h].
+ */
+function parseViewBox(viewBox: string): [number, number, number, number] {
+  const parts = viewBox.split(' ').map(Number);
+  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 100, parts[3] ?? 100];
+}
+
+/**
+ * Render a single entourage item onto the canvas.
+ * @param imageCache  Map keyed by CustomEntourageDef.id → loaded HTMLImageElement (for PNG items)
+ */
+function renderEntourageItem(
+  cs: CanvasState,
+  item: EntourageItem,
+  def: EntourageDef | CustomEntourageDef,
+  selected: boolean,
+  imageCache: Map<string, HTMLImageElement>
+): void {
+  const { ctx, zoom, camX, camY, width, height } = cs;
+  const sx = (item.x - camX) * zoom + width / 2;
+  const sy = (item.y - camY) * zoom + height / 2;
+
+  const [, , nomW, nomH] = parseViewBox(def.viewBox);
+  const scaleX = (item.widthCm * zoom) / nomW;
+  const scaleY = scaleX; // proportional
+
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate((item.rotation * Math.PI) / 180);
+  ctx.globalAlpha = item.opacity;
+
+  if (def.source === 'builtin') {
+    const path = new Path2D((def as EntourageDef).svgPath);
+    ctx.save();
+    ctx.scale(scaleX, scaleY);
+    ctx.translate(-nomW / 2, -nomH / 2);
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1.5 / scaleX;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke(path);
+    ctx.restore();
+  } else {
+    const img = imageCache.get(def.id);
+    if (img) {
+      const w = item.widthCm * zoom;
+      const h = w * (nomH / nomW);
+      ctx.drawImage(img, -w / 2, -h / 2, w, h);
+    }
+  }
+
+  // Selection ring
+  if (selected) {
+    const hw = (item.widthCm * zoom) / 2 + 4;
+    const hh = ((item.widthCm * zoom) * (nomH / nomW)) / 2 + 4;
+    ctx.strokeStyle = '#3b82f6';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+    ctx.setLineDash([]);
+
+    // Resize handle (bottom-right corner)
+    ctx.fillStyle = '#3b82f6';
+    ctx.fillRect(hw - 5, hh - 5, 10, 10);
+  }
+
+  ctx.restore();
+}
+
+/**
+ * Draw all plan-view entourage items for a floor.
+ */
+export function drawEntourageItems(
+  cs: CanvasState,
+  floor: Floor,
+  selectedItemId: string | null,
+  allDefs: (EntourageDef | CustomEntourageDef)[],
+  imageCache: Map<string, HTMLImageElement>
+): void {
+  if (!floor.entourageItems) return;
+  const defMap = new Map(allDefs.map((d) => [d.id, d]));
+
+  for (const item of floor.entourageItems) {
+    if (item.viewType !== 'plan') continue; // elevation items not rendered here
+    const def = defMap.get(item.defId);
+    if (!def) continue;
+    renderEntourageItem(cs, item, def, item.id === selectedItemId, imageCache);
+  }
+}
+
+/**
+ * Draw the placement ghost (follows cursor during stamp mode).
+ */
+export function drawEntourageGhost(
+  cs: CanvasState,
+  def: EntourageDef | CustomEntourageDef,
+  worldX: number,
+  worldY: number,
+  rotation: number,
+  imageCache: Map<string, HTMLImageElement>
+): void {
+  const { ctx, zoom, camX, camY, width, height } = cs;
+  const sx = (worldX - camX) * zoom + width / 2;
+  const sy = (worldY - camY) * zoom + height / 2;
+  const [, , nomW, nomH] = parseViewBox(def.viewBox);
+  const scaleX = (def.defaultWidthCm * zoom) / nomW;
+
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate((rotation * Math.PI) / 180);
+  ctx.globalAlpha = 0.5;
+
+  if (def.source === 'builtin') {
+    const path = new Path2D((def as EntourageDef).svgPath);
+    ctx.save();
+    ctx.scale(scaleX, scaleX);
+    ctx.translate(-nomW / 2, -nomH / 2);
+    ctx.strokeStyle = '#3b82f6';
+    ctx.lineWidth = 1.5 / scaleX;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke(path);
+    ctx.restore();
+  } else {
+    const img = imageCache.get(def.id);
+    if (img) {
+      const w = def.defaultWidthCm * zoom;
+      const h = w * (nomH / nomW);
+      ctx.drawImage(img, -w / 2, -h / 2, w, h);
+    }
+  }
+
+  ctx.restore();
 }
