@@ -1,29 +1,34 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { activeFloor, currentProject, detectedRoomsStore, selectedElementId } from '$lib/stores/project';
-  import type { Floor, Wall, Door, Window as Win, Room, Stair } from '$lib/models/types';
+  import { activeFloor, currentProject, detectedRoomsStore, selectedElementId, wallCutoffEnabled, xrefSyncTrigger, updateXRef } from '$lib/stores/project';
+  import type { Floor, Wall, Door, Window as Win, Room, Stair, StairType, XRefDxf, XRefNative, Project as ProjectType } from '$lib/models/types';
   import { wallColors, type WallColor } from '$lib/utils/materials';
   import { projectSettings, formatArea } from '$lib/stores/settings';
   import * as THREE from 'three';
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
   import MaterialPicker from './MaterialPicker.svelte';
+  import DimensionInput from '$lib/components/ui/DimensionInput.svelte';
   import { getCatalogItem, furnitureCatalog, furnitureCategories } from '$lib/utils/furnitureCatalog';
   import type { FurnitureDef } from '$lib/utils/furnitureCatalog';
   import { createFurnitureModel } from '$lib/utils/furnitureModels3d';
   import { createFurnitureModelWithGLB } from '$lib/utils/furnitureModelLoader';
   import {
-    addFurniture, removeFurniture, moveFurniture, updateFurniture,
-    addStair, addColumn, addDoor, addWindow,
-    placingFurnitureId, placingStair, placingColumn, placingColumnShape,
+    addFurniture, removeFurniture, moveFurniture, updateFurniture, resizeFurniture,
+    addStair, updateStair, addColumn, updateColumn, addDoor, addWindow, updateDoor, updateWindow, moveDoor, moveWindow,
+    placingFurnitureId, placingStair, placingStairType, placingColumn, placingColumnShape,
     placingDoorType, placingWindowType, selectedTool,
-    placingRoomPresetId, placingRoomTemplateName
+    placingRoomPresetId, placingRoomTemplateName,
+    placingWallSubType, placingWallHeight, addWall, updateWall,
+    beginDrag, cameraView, wallPaintColor, wallPaintTexture,
+    showAllFloorsStore, wallTransparentStore, sceneCommand
   } from '$lib/stores/project';
+  import type { WallSubType } from '$lib/stores/project';
   import { roomPresets } from '$lib/utils/roomPresets';
   import { roomTemplates, placeRoomTemplate } from '$lib/utils/roomTemplates';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
-  import { activeUser, highlightedCommentObjectId, addComment } from '$lib/stores/collaboration';
+  import { activeUser, highlightedCommentObjectId, focusedCommentId, comments3D, addComment } from '$lib/stores/collaboration';
 
   // Props
   const { collaborationMode = false }: { collaborationMode?: boolean } = $props();
@@ -44,7 +49,11 @@
   let currentFloor: Floor | null = null;
   let savedRooms: Room[] = [];
   let wallGroup: THREE.Group;
-  
+  let xrefGroup: THREE.Group;
+
+  // Wall cutoff: THREE.Plane clips all wall meshes at Y=30cm. Normal -Y → clips y > 30.
+  const WALL_CUTOFF_PLANE = new THREE.Plane(new THREE.Vector3(0, -1, 0), 30);
+
   // Raycasting for wall/furniture selection in 3D
   const raycaster = new THREE.Raycaster();
   const mouse = new THREE.Vector2();
@@ -58,11 +67,12 @@
   const originalEmissive = new Map<THREE.Object3D, THREE.Color>();
 
   // Unified active placement type
-  type PlacementType = 'none' | 'furniture' | 'stair' | 'column' | 'door' | 'window' | 'room';
-  let activePlacementType: PlacementType = 'none';
+  type PlacementType = 'none' | 'furniture' | 'stair' | 'column' | 'door' | 'window' | 'room' | 'wall';
+  let activePlacementType = $state<PlacementType>('none');
   let activeDoorType: Door['type'] = 'single';
   let activeWindowType: Win['type'] = 'standard';
   let activeColumnShape: 'round' | 'square' = 'round';
+  let activeStairType: StairType = 'straight';
   let activeRoomPresetId: string | null = null;
   let activeRoomTemplateName: string | null = null;
 
@@ -72,16 +82,103 @@
   // Hovering on a wall (for door/window placement)
   let wallHoverWallId: string | null = null;
 
+  // ── Wall drawing state ──────────────────────────────────────────────────────
+  let wallDrawStart = $state<{ x: number; z: number } | null>(null);
+  let wallGhostMesh: THREE.Mesh | null = null;
+  let wallGhostMaterial: THREE.MeshStandardMaterial | null = null;
+  let activeWallSubType = $state<WallSubType>('standard');
+  let activeWallHeight = 280;
+  // Curved wall: 3-click flow
+  let curvedWallStart: { x: number; z: number } | null = null;
+  let curvedWallEnd: { x: number; z: number } | null = null;
+  let curvedWallPhase = $state<0 | 1 | 2>(0);
+  // 3D DimensionInput overlay — shown after first wall click
+  let dim3DActive = $state(false);
+  let dim3DScreenX = $state(0);
+  let dim3DScreenY = $state(0);
+  let lastFloorHitPos = { x: 0, z: 0 }; // updated every mousemove in wall mode
+
+  // ── Resize handle state ─────────────────────────────────────────────────────
+  let handleGroup: THREE.Group | null = null;
+  type Handle3DType = 'resize-tl' | 'resize-tr' | 'resize-bl' | 'resize-br' | 'rotate';
+  let activeHandle: Handle3DType | null = null;
+  let handleDragFurnitureId: string | null = null;
+  let handleDragStart: THREE.Vector3 | null = null;
+  let handleDragOrigWidth = 0;
+  let handleDragOrigDepth = 0;
+  let handleDragOrigPos = { x: 0, z: 0 };
+  let handleDragOrigRotation = 0; // radians
+  // Map handle type → mesh for efficient position updates during drag
+  const handleMeshMap = new Map<Handle3DType, THREE.Mesh>();
+
+  // ── Opening drag state ──────────────────────────────────────────────────────
+  let draggingOpeningId: string | null = null;
+  let draggingOpeningType: 'door' | 'window' | null = null;
+  let draggingOpeningWallId: string | null = null;
+
+  // ── Hover tooltip state ─────────────────────────────────────────────────────
+  let hoverTooltip = $state<{ visible: boolean; x: number; y: number; label: string; dims: string } | null>(null);
+
+  // ── Normalize wall thickness toggle ─────────────────────────────────────────
+  let normalizeWallThickness = $state(false);
+
+  // ── Grid hover dot + camera save ────────────────────────────────────────────
+  let gridDotMesh: THREE.Mesh | null = null;
+  let savedPlacementCamera: { pos: THREE.Vector3; target: THREE.Vector3 } | null = null;
+
+  // ── Camera auto-fit: only fires once per floor switch, not on every mutation ─
+  let cameraInitialized = false;
+  let lastCameraFloorId: string | null = null;
+
+  // ── Two-phase placement: phase 0 = position, phase 1 = rotation ─────────────
+  let placementPhase = $state<0 | 1>(0);
+  let lockedPlacementPos: { x: number; z: number } | null = null;
+
   // Collaboration mode state
   let collabSelectedObjectId: string | null = null;
+  // ── Collaboration highlight constants ──────────────────────────────────────
+  const HIGHLIGHT_COLOR      = new THREE.Color('#cb674c');
+  const HIGHLIGHT_EMISSIVE   = new THREE.Color('#cb674c');
+  const HIGHLIGHT_EMISSIVE_I = 0.12;
+  const DIM_OPACITY          = 0.30;
+  const HOVER_OUTLINE_OPACITY = 0.55;
   let commentInputText = $state('');
   let commentInputVisible = $state(false);
   let canEdit = true; // resolved from activeUser store subscription
-  // Orange outline mesh for collab-highlighted object
-  let collabOutlineHelper: THREE.BoxHelper | null = null;
+  // Edges outline mesh for collab-highlighted object (click-selected)
+  let collabOutlineHelper: THREE.LineSegments | null = null;
+  // Edges outline mesh for collab hover preview (pre-click)
+  let collabHoverOutline: THREE.LineSegments | null = null;
+  let collabHoveredObjectId: string | null = null;
+  // Focus mode
+  let focusMode = $state(false);
+  let focusCommentText = $state('');
+  // Saved mesh state for focus mode restore: meshUuid → SavedMeshState
+  type SavedMeshState = {
+    opacity: number; transparent: boolean;
+    color: THREE.Color; emissive: THREE.Color; emissiveIntensity: number;
+    wireframe: boolean;
+  };
+  const meshOriginalOpacity = new Map<string, SavedMeshState>();
+  // Camera position/target before focus so we can restore
+  let preFocusCameraPos: THREE.Vector3 | null = null;
+  let preFocusTarget: THREE.Vector3 | null = null;
+
+  // Cleanup outline helpers and focus state when leaving collaboration mode
+  $effect(() => {
+    if (!collaborationMode) {
+      if (collabOutlineHelper) { scene?.remove(collabOutlineHelper); collabOutlineHelper = null; }
+      if (collabHoverOutline) { scene?.remove(collabHoverOutline); collabHoverOutline = null; }
+      collabHoveredObjectId = null;
+      collabSelectedObjectId = null;
+      commentInputVisible = false;
+      if (focusMode) exitFocusMode();
+      markSceneDirty?.();
+    }
+  });
 
   // 3D Edit mode — enables click-to-select
-  let editMode = $state(false);
+  let editMode = $state(true);
   // Material picker state
   let materialPickerPos = $state<{ x: number; y: number } | null>(null);
   let materialPickerWall = $state<Wall | null>(null);
@@ -742,6 +839,7 @@
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.2;
+    renderer.localClippingEnabled = true; // required for per-material clipping planes
     container.appendChild(renderer.domElement);
 
     controls = new OrbitControls(camera, renderer.domElement);
@@ -749,6 +847,23 @@
     controls.dampingFactor = 0.08;
     controls.target.set(0, 100, 0);
     controls.maxPolarAngle = Math.PI / 2.05;
+    // Reserve left-click for selection; orbit via middle mouse or right drag
+    controls.mouseButtons = {
+      LEFT: null as any,
+      MIDDLE: THREE.MOUSE.ROTATE,
+      RIGHT: THREE.MOUSE.ROTATE
+    };
+    // Alt + left-drag orbits (trackpad two-finger drag workaround)
+    renderer.domElement.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.button === 0 && e.altKey) {
+        controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE as any;
+        const reset = () => {
+          controls.mouseButtons.LEFT = null as any;
+          window.removeEventListener('pointerup', reset);
+        };
+        window.addEventListener('pointerup', reset);
+      }
+    }, true); // capture phase — runs before OrbitControls sees the event
     // Mark dirty when orbit controls move the camera
     controls.addEventListener('change', markSceneDirty);
 
@@ -759,12 +874,88 @@
       dragPointerDownPos = { x: e.clientX, y: e.clientY };
       draggingFurnitureId = null;
 
-      if (!editMode || furniturePlacementMode || walkthroughMode || cameraPlacementMode || !canEdit) return;
-
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
+
+      // Save camera state for non-wall placement modes to prevent OrbitControls drift
+      if (activePlacementType !== 'none' && activePlacementType !== 'wall') {
+        savedPlacementCamera = { pos: camera.position.clone(), target: controls.target.clone() };
+      }
+
+      // ── Wall drawing: intercept before other handlers ─────────────────────
+      if (activePlacementType === 'wall' && editMode && !walkthroughMode && canEdit) {
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+          const pt = { x: snap3D(hit.x), z: snap3D(hit.z) };
+          if (activeWallSubType === 'curved') {
+            handleCurvedWallClick(pt);
+          } else {
+            // Double-click detection: commit wall and exit tool
+            if (e.detail === 2 && wallDrawStart) {
+              const snapped = angleSnap3D(wallDrawStart, pt);
+              if (!wallGhostCollides(wallDrawStart, snapped)) {
+                const wallId = addWall({ x: wallDrawStart.x, y: wallDrawStart.z }, { x: snapped.x, y: snapped.z });
+                if (activeWallSubType === 'half') updateWall(wallId, { height: activeWallHeight });
+              }
+              exitPlacementMode();
+              return;
+            }
+            handleStraightWallClick(pt);
+          }
+        }
+        return;
+      }
+
+      if (!editMode || furniturePlacementMode || walkthroughMode || cameraPlacementMode || !canEdit) return;
+
+      // ── Resize handle hit detection (before furniture drag) ───────────────
+      if (handleGroup && handleGroup.visible) {
+        const handleMeshes: THREE.Object3D[] = [];
+        handleGroup.traverse(obj => { if ((obj as THREE.Mesh).isMesh) handleMeshes.push(obj); });
+        const handleHits = raycaster.intersectObjects(handleMeshes, false);
+        if (handleHits.length > 0) {
+          const hitObj = handleHits[0].object;
+          activeHandle = hitObj.userData.handleType as Handle3DType;
+          handleDragFurnitureId = hitObj.userData.furnitureId as string;
+          controls.enabled = false;
+          // Capture original state
+          let furObj: THREE.Object3D | null = null;
+          wallGroup.traverse(obj => { if (!furObj && obj.userData.furnitureId === handleDragFurnitureId && obj.parent === wallGroup) furObj = obj; });
+          if (furObj) {
+            const box = new THREE.Box3().setFromObject(furObj);
+            const size = box.getSize(new THREE.Vector3());
+            const center = box.getCenter(new THREE.Vector3());
+            handleDragOrigWidth = size.x;
+            handleDragOrigDepth = size.z;
+            handleDragOrigPos = { x: center.x, z: center.z };
+          }
+          const floor = get(activeFloor);
+          const fi = floor?.furniture.find((f: any) => f.id === handleDragFurnitureId);
+          handleDragOrigRotation = ((fi?.rotation ?? 0) * Math.PI) / 180;
+          const hitPt = new THREE.Vector3();
+          if (raycaster.ray.intersectPlane(floorPlane, hitPt)) handleDragStart = hitPt.clone();
+          beginDrag('Resized furniture');
+          return;
+        }
+      }
+
+      // ── Opening (door/window) drag detection ─────────────────────────────
+      const openingMeshes: THREE.Object3D[] = [];
+      wallGroup.traverse(obj => {
+        if ((obj as THREE.Mesh).isMesh && (obj.userData.doorId || obj.userData.windowId)) openingMeshes.push(obj);
+      });
+      const openingHits = raycaster.intersectObjects(openingMeshes, false);
+      if (openingHits.length > 0) {
+        const hitObj = openingHits[0].object;
+        draggingOpeningId = hitObj.userData.doorId || hitObj.userData.windowId;
+        draggingOpeningType = hitObj.userData.doorId ? 'door' : 'window';
+        draggingOpeningWallId = hitObj.userData.wallId ?? null;
+        controls.enabled = false;
+        beginDrag(`Moved ${draggingOpeningType}`);
+        return;
+      }
 
       // Check if pointer is on a furniture object — if so, prepare for drag
       const allMeshes: THREE.Object3D[] = [];
@@ -779,9 +970,55 @@
     renderer.domElement.addEventListener('pointerup', (e) => {
       controls.enabled = true;
 
+      // Restore camera to prevent OrbitControls drift during placement clicks
+      if (savedPlacementCamera) {
+        camera.position.copy(savedPlacementCamera.pos);
+        controls.target.copy(savedPlacementCamera.target);
+        controls.update();
+        savedPlacementCamera = null;
+      }
+
       const totalDx = e.clientX - dragPointerDownPos.x;
       const totalDy = e.clientY - dragPointerDownPos.y;
       const wasDrag = Math.hypot(totalDx, totalDy) > 5;
+
+      // ── Handle drag finalization ──────────────────────────────────────────
+      if (activeHandle && handleDragFurnitureId) {
+        activeHandle = null;
+        handleDragFurnitureId = null;
+        handleDragStart = null;
+        return;
+      }
+
+      // ── Opening drag finalization ─────────────────────────────────────────
+      if (draggingOpeningId) {
+        if (wasDrag) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          if (draggingOpeningWallId) {
+            const wallMeshes: THREE.Object3D[] = [];
+            wallGroup.traverse((obj: any) => {
+              if (!(obj as THREE.Mesh).isMesh) return;
+              if (obj.userData.wallId !== draggingOpeningWallId) return;
+              if (obj.userData.doorId === draggingOpeningId) return;
+              if (obj.userData.windowId === draggingOpeningId) return;
+              wallMeshes.push(obj);
+            });
+            const wallHits = raycaster.intersectObjects(wallMeshes, false);
+            if (wallHits.length > 0) {
+              const finalPos = getWallHitPosition(wallHits[0].point, draggingOpeningWallId);
+              if (draggingOpeningType === 'door') updateDoor(draggingOpeningId, { position: finalPos });
+              else updateWindow(draggingOpeningId, { position: finalPos });
+            }
+          }
+        }
+        draggingOpeningId = null;
+        draggingOpeningType = null;
+        draggingOpeningWallId = null;
+        return;
+      }
 
       // Finalize furniture drag — commit new position to store
       if (draggingFurnitureId) {
@@ -807,25 +1044,32 @@
         return;
       }
 
-      // ── Collaboration mode click → select object and open comment input ──
+      // ── Collaboration mode click → select any mesh and open comment input ──
       if (collaborationMode && !wasDrag && !walkthroughMode) {
         const rect2 = renderer.domElement.getBoundingClientRect();
         mouse.x = ((e.clientX - rect2.left) / rect2.width) * 2 - 1;
         mouse.y = -((e.clientY - rect2.top) / rect2.height) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
 
-        // Try furniture first
-        const fMeshes: THREE.Object3D[] = [];
-        wallGroup.traverse(obj => { if ((obj as THREE.Mesh).isMesh && obj.userData.furnitureId) fMeshes.push(obj); });
-        const fHits = raycaster.intersectObjects(fMeshes, false);
-        if (fHits.length > 0) {
-          collabSelectedObjectId = fHits[0].object.userData.furnitureId as string;
-        } else {
-          // Try walls
-          const wHits = raycaster.intersectObjects(wallGroup.children, false);
-          const wHit = wHits.find(h => h.object.userData.wallId);
-          collabSelectedObjectId = wHit ? (wHit.object.userData.wallId as string) : null;
-        }
+        // Universal: collect all scene meshes, skip UI-only helpers
+        const targetMeshes: THREE.Object3D[] = [];
+        scene.traverse(obj => {
+          if (!(obj as THREE.Mesh).isMesh) return;
+          if (obj.userData?.isHandleGroup) return;
+          if (obj.userData?.isSelectionBox) return;
+          if (obj === gridDotMesh) return;
+          targetMeshes.push(obj);
+        });
+
+        const hits = raycaster.intersectObjects(targetMeshes, false);
+        const hit = hits[0];
+        collabSelectedObjectId = hit
+          ? (hit.object.userData.furnitureId
+              ?? hit.object.userData.wallId
+              ?? hit.object.userData.doorId
+              ?? hit.object.userData.windowId
+              ?? hit.object.uuid)
+          : null;
 
         setCollabOutline(collabSelectedObjectId);
         commentInputVisible = collabSelectedObjectId !== null;
@@ -879,37 +1123,83 @@
         return;
       }
 
-      // Active placement mode: furniture / stair / column / room on floor
+      // Active placement mode: furniture / stair / column / room on floor (two-phase)
       if (activePlacementType === 'furniture' && selectedCatalogId) {
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
-          addFurniture(selectedCatalogId, { x: hit.x, y: hit.z });
+          if (placementPhase === 0) {
+            const prox = proximitySnap({ x: hit.x, z: hit.z });
+            lockedPlacementPos = { x: prox.x !== hit.x ? prox.x : hit.x, z: prox.z !== hit.z ? prox.z : hit.z };
+            placementPhase = 1;
+          } else if (placementPhase === 1 && lockedPlacementPos) {
+            const rotation = ghostGroup ? ((-ghostGroup.rotation.y * 180 / Math.PI) + 360) % 360 : 0;
+            const id = addFurniture(selectedCatalogId, { x: lockedPlacementPos.x, y: lockedPlacementPos.z });
+            updateFurniture(id, { rotation: Math.round(rotation / 45) * 45 });
+            placementPhase = 0; lockedPlacementPos = null;
+            exitPlacementMode();
+          }
         }
         return;
       }
       if (activePlacementType === 'stair') {
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
-          addStair({ x: hit.x, y: hit.z });
+          if (placementPhase === 0) {
+            const prox = proximitySnap({ x: hit.x, z: hit.z });
+            const sx = prox.x !== hit.x ? prox.x : snap3D(hit.x);
+            const sz = prox.z !== hit.z ? prox.z : snap3D(hit.z);
+            lockedPlacementPos = { x: sx, z: sz };
+            if (ghostGroup) ghostGroup.position.set(sx, 0, sz);
+            placementPhase = 1;
+          } else if (placementPhase === 1 && lockedPlacementPos) {
+            const rotation = ghostGroup ? ((-ghostGroup.rotation.y * 180 / Math.PI) + 360) % 360 : 0;
+            const id = addStair({ x: lockedPlacementPos.x, y: lockedPlacementPos.z }, activeStairType);
+            updateStair(id, { rotation: Math.round(rotation / 45) * 45 });
+            placementPhase = 0; lockedPlacementPos = null;
+            exitPlacementMode();
+          }
         }
         return;
       }
       if (activePlacementType === 'column') {
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
-          addColumn({ x: hit.x, y: hit.z }, activeColumnShape);
+          if (placementPhase === 0) {
+            const prox = proximitySnap({ x: hit.x, z: hit.z });
+            const sx = prox.x !== hit.x ? prox.x : snap3D(hit.x);
+            const sz = prox.z !== hit.z ? prox.z : snap3D(hit.z);
+            lockedPlacementPos = { x: sx, z: sz };
+            if (ghostGroup) ghostGroup.position.set(sx, 0, sz);
+            placementPhase = 1;
+          } else if (placementPhase === 1 && lockedPlacementPos) {
+            const rotation = ghostGroup ? ((-ghostGroup.rotation.y * 180 / Math.PI) + 360) % 360 : 0;
+            const id = addColumn({ x: lockedPlacementPos.x, y: lockedPlacementPos.z }, activeColumnShape);
+            updateColumn(id, { rotation: Math.round(rotation / 45) * 45 });
+            placementPhase = 0; lockedPlacementPos = null;
+            exitPlacementMode();
+          }
         }
         return;
       }
       if (activePlacementType === 'room' && activeRoomPresetId) {
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
-          const preset = roomPresets.find(p => p.id === activeRoomPresetId);
-          if (preset) {
-            const template = activeRoomTemplateName
-              ? roomTemplates.find(t => t.name === activeRoomTemplateName) ?? null : null;
-            placeRoomTemplate(preset, { x: hit.x, y: hit.z }, template);
-            exitPlacementMode();
+          if (placementPhase === 0) {
+            const prox = proximitySnap({ x: hit.x, z: hit.z });
+            const sx = prox.x !== hit.x ? prox.x : snap3D(hit.x);
+            const sz = prox.z !== hit.z ? prox.z : snap3D(hit.z);
+            lockedPlacementPos = { x: sx, z: sz };
+            if (ghostGroup) ghostGroup.position.set(sx, 0, sz);
+            placementPhase = 1;
+          } else if (placementPhase === 1 && lockedPlacementPos) {
+            const preset = roomPresets.find(p => p.id === activeRoomPresetId);
+            if (preset) {
+              const template = activeRoomTemplateName
+                ? roomTemplates.find(t => t.name === activeRoomTemplateName) ?? null : null;
+              placeRoomTemplate(preset, { x: lockedPlacementPos.x, y: lockedPlacementPos.z }, template);
+              placementPhase = 0; lockedPlacementPos = null;
+              exitPlacementMode();
+            }
           }
         }
         return;
@@ -956,8 +1246,10 @@
         return;
       }
 
-      // Fall back to wall selection
-      const intersects = raycaster.intersectObjects(wallGroup.children, false);
+      // Fall back to wall selection — traverse to collect all leaf wall meshes
+      const wallMeshesForSel: THREE.Object3D[] = [];
+      wallGroup.traverse((obj: any) => { if ((obj as THREE.Mesh).isMesh && obj.userData?.wallId) wallMeshesForSel.push(obj); });
+      const intersects = raycaster.intersectObjects(wallMeshesForSel, false);
       let hitWallId: string | null = null;
       for (const hit of intersects) {
         if (hit.object.userData.wallId) {
@@ -967,6 +1259,26 @@
       }
       selectedFurnitureId = null;
       updateSelectionBox();
+
+      // If paint mode is active, apply directly to the clicked face instead of selecting
+      const paintHit = intersects[0];
+      const activePaintColor = get(wallPaintColor);
+      const activePaintTexture = get(wallPaintTexture);
+      if (hitWallId && paintHit?.face && (activePaintColor || activePaintTexture) && currentFloor) {
+        const paintWall = currentFloor.walls.find(w => w.id === hitWallId);
+        if (paintWall) {
+          // face.normal.z in local space: +z = front (interior), -z = back (exterior)
+          const localNormal = paintHit.face.normal;
+          const side: 'interior' | 'exterior' = localNormal.z >= 0 ? 'interior' : 'exterior';
+          if (side === 'interior') {
+            updateWall(hitWallId, { interiorColor: activePaintColor ?? paintWall.interiorColor, interiorTexture: activePaintTexture ?? undefined });
+          } else {
+            updateWall(hitWallId, { exteriorColor: activePaintColor ?? paintWall.exteriorColor, exteriorTexture: activePaintTexture ?? undefined });
+          }
+          return;
+        }
+      }
+
       selectedElementId.set(hitWallId);
 
       if (hitWallId && currentFloor) {
@@ -987,15 +1299,59 @@
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
 
+      // Grid hover dot — proximity-snaps then grid-snaps during any placement mode
+      if (activePlacementType !== 'none' && gridDotMesh) {
+        const dotHit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, dotHit)) {
+          const prox = proximitySnap({ x: dotHit.x, z: dotHit.z });
+          const sx = prox.x !== dotHit.x ? prox.x : snap3D(dotHit.x);
+          const sz = prox.z !== dotHit.z ? prox.z : snap3D(dotHit.z);
+          gridDotMesh.position.set(sx, 1, sz);
+          gridDotMesh.visible = true;
+        } else {
+          gridDotMesh.visible = false;
+        }
+        markSceneDirty();
+      } else if (gridDotMesh && gridDotMesh.visible) {
+        gridDotMesh.visible = false;
+        markSceneDirty();
+      }
+
       // Furniture placement ghost (from sidebar or legacy toolbar)
       if (activePlacementType === 'furniture' || (furniturePlacementMode && selectedCatalogId)) {
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
           if (!ghostGroup && selectedCatalogId) createGhostPreview(selectedCatalogId);
-          if (ghostGroup) { ghostGroup.position.set(hit.x, 1.5, hit.z); ghostGroup.visible = true; }
+          if (ghostGroup) {
+            if (placementPhase === 1 && lockedPlacementPos) {
+              const dx = hit.x - lockedPlacementPos.x;
+              const dz = hit.z - lockedPlacementPos.z;
+              const angleDeg = ((Math.atan2(dz, dx) * 180 / Math.PI) + 360) % 360;
+              ghostGroup.rotation.y = -(Math.round(angleDeg / 45) * 45 * Math.PI / 180);
+            } else {
+              const prox = proximitySnap({ x: hit.x, z: hit.z });
+              const sx = prox.x !== hit.x ? prox.x : hit.x;
+              const sz = prox.z !== hit.z ? prox.z : hit.z;
+              ghostGroup.position.set(sx, 1.5, sz);
+            }
+            ghostGroup.visible = true;
+          }
         } else if (ghostGroup) { ghostGroup.visible = false; }
         renderer.domElement.style.cursor = 'crosshair';
         markSceneDirty();
+        return;
+      }
+      // Wall drawing ghost
+      if (activePlacementType === 'wall') {
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+          const prox = proximitySnap({ x: hit.x, z: hit.z });
+          const sx = prox.x !== hit.x ? prox.x : snap3D(hit.x);
+          const sz = prox.z !== hit.z ? prox.z : snap3D(hit.z);
+          lastFloorHitPos = { x: sx, z: sz };
+          handleWallDrawingMove({ x: sx, z: sz });
+        }
+        renderer.domElement.style.cursor = 'crosshair';
         return;
       }
       // Stair / column placement ghost on floor
@@ -1006,7 +1362,22 @@
             if (activePlacementType === 'stair') createStructureGhost('stair');
             else createStructureGhost('column', activeColumnShape);
           }
-          if (ghostGroup) { ghostGroup.position.set(hit.x, 0, hit.z); ghostGroup.visible = true; }
+          if (ghostGroup) {
+            if (placementPhase === 1 && lockedPlacementPos) {
+              // Phase 1: ghost stays locked; rotate it toward cursor
+              const dx = hit.x - lockedPlacementPos.x;
+              const dz = hit.z - lockedPlacementPos.z;
+              const angleDeg = ((Math.atan2(dz, dx) * 180 / Math.PI) + 360) % 360;
+              const snappedAngle = Math.round(angleDeg / 45) * 45;
+              ghostGroup.rotation.y = -(snappedAngle * Math.PI / 180);
+            } else {
+              const prox = proximitySnap({ x: hit.x, z: hit.z });
+              const sx = prox.x !== hit.x ? prox.x : snap3D(hit.x);
+              const sz = prox.z !== hit.z ? prox.z : snap3D(hit.z);
+              ghostGroup.position.set(sx, 0, sz);
+            }
+            ghostGroup.visible = true;
+          }
         } else if (ghostGroup) { ghostGroup.visible = false; }
         renderer.domElement.style.cursor = 'crosshair';
         markSceneDirty();
@@ -1016,8 +1387,20 @@
       if (activePlacementType === 'room') {
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
-          // Simple cross-hair indicator instead of full ghost
-          if (ghostGroup) { ghostGroup.position.set(hit.x, 2, hit.z); ghostGroup.visible = true; }
+          if (ghostGroup) {
+            if (placementPhase === 1 && lockedPlacementPos) {
+              const dx = hit.x - lockedPlacementPos.x;
+              const dz = hit.z - lockedPlacementPos.z;
+              const angleDeg = ((Math.atan2(dz, dx) * 180 / Math.PI) + 360) % 360;
+              ghostGroup.rotation.y = -(Math.round(angleDeg / 45) * 45 * Math.PI / 180);
+            } else {
+              const prox = proximitySnap({ x: hit.x, z: hit.z });
+              const sx = prox.x !== hit.x ? prox.x : snap3D(hit.x);
+              const sz = prox.z !== hit.z ? prox.z : snap3D(hit.z);
+              ghostGroup.position.set(sx, 0, sz);
+            }
+            ghostGroup.visible = true;
+          }
         } else if (ghostGroup) { ghostGroup.visible = false; }
         renderer.domElement.style.cursor = 'crosshair';
         markSceneDirty();
@@ -1051,12 +1434,59 @@
       }
       if (ghostGroup) ghostGroup.visible = false;
 
+      // ── Handle drag ───────────────────────────────────────────────────────
+      if (activeHandle && handleDragFurnitureId && handleDragStart) {
+        const hitPt = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(floorPlane, hitPt)) {
+          if (activeHandle === 'rotate') {
+            const dx = hitPt.x - handleDragOrigPos.x;
+            const dz = hitPt.z - handleDragOrigPos.z;
+            const angleDeg = ((Math.atan2(dz, dx) * 180 / Math.PI) + 360) % 360;
+            const snapped = Math.round(angleDeg / 5) * 5;
+            resizeFurniture(handleDragFurnitureId, { rotation: snapped });
+          } else {
+            const worldDelta = hitPt.clone().sub(handleDragStart);
+            // Transform delta into furniture local space using inverse Y rotation
+            const localDelta = worldDelta.clone().applyEuler(new THREE.Euler(0, -handleDragOrigRotation, 0));
+            const isLeft = activeHandle === 'resize-tl' || activeHandle === 'resize-bl';
+            const isFront = activeHandle === 'resize-tl' || activeHandle === 'resize-tr';
+            const newW = Math.max(30, handleDragOrigWidth + (isLeft ? -localDelta.x : localDelta.x));
+            const newD = Math.max(30, handleDragOrigDepth + (isFront ? -localDelta.z : localDelta.z));
+            const newCX = handleDragOrigPos.x + localDelta.x / 2;
+            const newCZ = handleDragOrigPos.z + localDelta.z / 2;
+            resizeFurniture(handleDragFurnitureId, {
+              width: newW, depth: newD,
+              position: { x: newCX, y: newCZ },
+            });
+          }
+          repositionHandles(handleDragFurnitureId);
+        }
+        renderer.domElement.style.cursor = 'ew-resize';
+        return;
+      }
+
+      // ── Opening drag ──────────────────────────────────────────────────────
+      if (draggingOpeningId && draggingOpeningWallId) {
+        const wallMeshes: THREE.Object3D[] = [];
+        wallGroup.traverse((obj: any) => {
+          if (!(obj as THREE.Mesh).isMesh) return;
+          if (obj.userData.wallId !== draggingOpeningWallId) return;
+          if (obj.userData.doorId === draggingOpeningId) return;
+          if (obj.userData.windowId === draggingOpeningId) return;
+          wallMeshes.push(obj);
+        });
+        const wallHits = raycaster.intersectObjects(wallMeshes, false);
+        if (wallHits.length > 0) {
+          const newPos = getWallHitPosition(wallHits[0].point, draggingOpeningWallId);
+          if (draggingOpeningType === 'door') moveDoor(draggingOpeningId, newPos);
+          else moveWindow(draggingOpeningId, newPos);
+        }
+        renderer.domElement.style.cursor = 'ew-resize';
+        return;
+      }
+
       // Furniture drag — move model visually
       if (draggingFurnitureId) {
-        const rect2 = renderer.domElement.getBoundingClientRect();
-        mouse.x = ((e.clientX - rect2.left) / rect2.width) * 2 - 1;
-        mouse.y = -((e.clientY - rect2.top) / rect2.height) * 2 + 1;
-        raycaster.setFromCamera(mouse, camera);
         const hit = new THREE.Vector3();
         if (raycaster.ray.intersectPlane(floorPlane, hit)) {
           // Update model position live for visual feedback
@@ -1068,6 +1498,72 @@
           markSceneDirty();
         }
         renderer.domElement.style.cursor = 'grabbing';
+        return;
+      }
+
+      // ── Hover tooltips for doors/windows ─────────────────────────────────
+      if (!draggingFurnitureId && !draggingOpeningId && !activeHandle && activePlacementType === 'none') {
+        const openingMeshes: THREE.Object3D[] = [];
+        wallGroup.traverse(obj => {
+          if ((obj as THREE.Mesh).isMesh && (obj.userData.doorId || obj.userData.windowId)) openingMeshes.push(obj);
+        });
+        const tooltipHits = raycaster.intersectObjects(openingMeshes, false);
+        if (tooltipHits.length > 0) {
+          const hitObj = tooltipHits[0].object;
+          const floor = get(activeFloor);
+          let label = '';
+          let dims = '';
+          if (hitObj.userData.doorId) {
+            const door = floor?.doors.find((d: any) => d.id === hitObj.userData.doorId);
+            if (door) {
+              label = `${door.type.charAt(0).toUpperCase() + door.type.slice(1)} Door`;
+              dims = `${door.width}×${door.height} cm`;
+            }
+          } else if (hitObj.userData.windowId) {
+            const win = floor?.windows.find((w: any) => w.id === hitObj.userData.windowId);
+            if (win) {
+              label = `${win.type.charAt(0).toUpperCase() + win.type.slice(1)} Window`;
+              dims = `${win.width}×${win.height} cm, sill ${win.sillHeight} cm`;
+            }
+          }
+          if (label) {
+            const worldPos = new THREE.Vector3();
+            (tooltipHits[0].object as THREE.Mesh).getWorldPosition(worldPos);
+            worldPos.project(camera);
+            const r = renderer.domElement.getBoundingClientRect();
+            const sx = ((worldPos.x + 1) / 2) * r.width;
+            const sy = ((-worldPos.y + 1) / 2) * r.height;
+            hoverTooltip = { visible: true, x: sx, y: sy - 48, label, dims };
+          } else {
+            hoverTooltip = null;
+          }
+        } else if (hoverTooltip) {
+          hoverTooltip = null;
+        }
+      }
+
+      // ── Collaboration mode hover highlight ────────────────────────────────
+      if (collaborationMode && !walkthroughMode) {
+        const allMeshes: THREE.Object3D[] = [];
+        scene.traverse(obj => {
+          if (!(obj as THREE.Mesh).isMesh) return;
+          if (obj.userData?.isHandleGroup) return;
+          if (obj.userData?.isSelectionBox) return;
+          if (obj === gridDotMesh) return;
+          allMeshes.push(obj);
+        });
+        const hHits = raycaster.intersectObjects(allMeshes, false);
+        const hHit = hHits[0];
+        const hoveredId = hHit
+          ? (hHit.object.userData.furnitureId
+              ?? hHit.object.userData.wallId
+              ?? hHit.object.uuid)
+          : null;
+        if (hoveredId !== collabHoveredObjectId) {
+          collabHoveredObjectId = hoveredId;
+          setCollabHover(hoveredId);
+        }
+        renderer.domElement.style.cursor = hHit ? 'pointer' : '';
         return;
       }
 
@@ -1151,13 +1647,34 @@
     wallGroup = new THREE.Group();
     scene.add(wallGroup);
 
+    xrefGroup = new THREE.Group();
+    scene.add(xrefGroup);
+
     // Placement grid — hidden until an object is selected or being placed
     gridHelper = new THREE.GridHelper(8000, 160, 0x555555, 0x333333);
     (gridHelper.material as THREE.LineBasicMaterial).opacity = 0.3;
     (gridHelper.material as THREE.LineBasicMaterial).transparent = true;
-    gridHelper.position.y = 1.8;
+    gridHelper.position.y = 0.5;
     gridHelper.visible = false;
     scene.add(gridHelper);
+
+    // Resize handle group — separate from wallGroup so it survives rebuilds
+    handleGroup = new THREE.Group();
+    handleGroup.visible = false;
+    handleGroup.userData.isHandleGroup = true;
+    scene.add(handleGroup);
+
+    // Grid hover dot — snaps to grid intersections in placement mode
+    const dotGeo = new THREE.SphereGeometry(6, 8, 8);
+    const dotMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff, emissive: new THREE.Color(0x88aaff),
+      emissiveIntensity: 0.9, transparent: true, opacity: 0.85
+    });
+    gridDotMesh = new THREE.Mesh(dotGeo, dotMat);
+    (gridDotMesh.material as THREE.MeshStandardMaterial).depthTest = false;
+    gridDotMesh.renderOrder = 1000;
+    gridDotMesh.visible = false;
+    scene.add(gridDotMesh);
   }
 
   function createGhostPreview(catalogId: string) {
@@ -1205,21 +1722,405 @@
       emissive: new THREE.Color(0x2244ff), emissiveIntensity: 0.3
     });
     const group = new THREE.Group();
-    let mesh: THREE.Mesh;
     if (type === 'stair') {
-      mesh = new THREE.Mesh(new THREE.BoxGeometry(100, 30, 300), mat);
-      mesh.position.y = 15;
-    } else if (shape === 'square') {
-      mesh = new THREE.Mesh(new THREE.BoxGeometry(30, 280, 30), mat);
-      mesh.position.y = 140;
+      const RISERS = 14;
+      const totalHeight = 200;
+      if (activeStairType === 'spiral') {
+        // Spiral ghost: matches buildStairs() spiral geometry
+        const radius = 100;
+        const postR = radius * 0.1;
+        const totalAngle = Math.PI * 1.75;
+        const riserHeight = totalHeight / RISERS;
+        // Center post
+        const postGeo = new THREE.CylinderGeometry(postR, postR, totalHeight, 8);
+        const post = new THREE.Mesh(postGeo, mat);
+        post.position.set(0, totalHeight / 2, 0);
+        group.add(post);
+        // Wedge treads
+        for (let i = 0; i < RISERS; i++) {
+          const angle = (i / RISERS) * totalAngle;
+          const nextAngle = ((i + 1) / RISERS) * totalAngle;
+          const y = (i + 1) * riserHeight;
+          const treadShape = new THREE.Shape();
+          treadShape.moveTo(postR * Math.cos(angle), postR * Math.sin(angle));
+          treadShape.lineTo(radius * Math.cos(angle), radius * Math.sin(angle));
+          const arcSteps = 4;
+          for (let j = 1; j <= arcSteps; j++) {
+            const a = angle + (nextAngle - angle) * (j / arcSteps);
+            treadShape.lineTo(radius * Math.cos(a), radius * Math.sin(a));
+          }
+          treadShape.lineTo(postR * Math.cos(nextAngle), postR * Math.sin(nextAngle));
+          treadShape.closePath();
+          const geo = new THREE.ExtrudeGeometry(treadShape, { depth: 3, bevelEnabled: false });
+          const tread = new THREE.Mesh(geo, mat);
+          tread.rotation.x = -Math.PI / 2;
+          tread.position.y = y;
+          group.add(tread);
+        }
+      } else {
+        // Straight ghost: 14 stacked box steps
+        const tread = 300 / RISERS;
+        const rise  = totalHeight / RISERS;
+        for (let i = 0; i < RISERS; i++) {
+          const stepGeo = new THREE.BoxGeometry(100, rise, tread);
+          const stepMesh = new THREE.Mesh(stepGeo, mat);
+          stepMesh.position.set(0, rise / 2 + rise * i, -150 + tread * i + tread / 2);
+          group.add(stepMesh);
+        }
+      }
     } else {
-      mesh = new THREE.Mesh(new THREE.CylinderGeometry(15, 15, 280, 16), mat);
+      let mesh: THREE.Mesh;
+      if (shape === 'square') {
+        mesh = new THREE.Mesh(new THREE.BoxGeometry(30, 280, 30), mat);
+      } else {
+        mesh = new THREE.Mesh(new THREE.CylinderGeometry(15, 15, 280, 16), mat);
+      }
       mesh.position.y = 140;
+      mesh.rotation.set(0, 0, 0);
+      group.add(mesh);
     }
-    group.add(mesh);
+    group.rotation.set(0, 0, 0);
+    group.position.set(0, 0, 0);
     group.visible = false;
     ghostGroup = group;
     scene.add(ghostGroup);
+  }
+
+  // ── 3D grid snap helpers (XZ plane; mirror of 2D canvasInteraction utilities) ─
+  const GRID_CM = 25;
+  function snap3D(v: number): number {
+    return Math.round(v / GRID_CM) * GRID_CM;
+  }
+
+  const PROXIMITY_CM = 15;
+  function proximitySnap(pos: { x: number; z: number }): { x: number; z: number } {
+    const floor = get(activeFloor);
+    if (!floor) return pos;
+    let bestDist = PROXIMITY_CM;
+    let snapped = pos;
+    const candidates: { x: number; z: number }[] = [];
+    for (const w of floor.walls) {
+      candidates.push({ x: w.start.x, z: w.start.y });
+      candidates.push({ x: w.end.x,   z: w.end.y   });
+      candidates.push({ x: (w.start.x + w.end.x) / 2, z: (w.start.y + w.end.y) / 2 });
+    }
+    for (const fi of floor.furniture ?? []) {
+      candidates.push({ x: fi.position.x, z: fi.position.y });
+    }
+    for (const c of candidates) {
+      const d = Math.hypot(c.x - pos.x, c.z - pos.z);
+      if (d < bestDist) { bestDist = d; snapped = c; }
+    }
+    return snapped;
+  }
+
+  function angleSnap3D(
+    start: { x: number; z: number },
+    end: { x: number; z: number }
+  ): { x: number; z: number } {
+    const dx = end.x - start.x;
+    const dz = end.z - start.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 5) return end;
+    const angle = Math.atan2(dz, dx);
+    const SNAP_ANGLES = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4,
+                         Math.PI, -Math.PI, -3 * Math.PI / 4, -Math.PI / 2, -Math.PI / 4];
+    const THRESHOLD = Math.PI / 18; // 10°
+    for (const sa of SNAP_ANGLES) {
+      if (Math.abs(angle - sa) < THRESHOLD) {
+        return { x: start.x + len * Math.cos(sa), z: start.z + len * Math.sin(sa) };
+      }
+    }
+    return end;
+  }
+
+  // ── Wall ghost helpers ────────────────────────────────────────────────────
+  function removeWallGhost() {
+    if (wallGhostMesh) {
+      scene.remove(wallGhostMesh);
+      wallGhostMesh.geometry.dispose();
+      if (wallGhostMaterial) { wallGhostMaterial.dispose(); wallGhostMaterial = null; }
+      wallGhostMesh = null;
+      markSceneDirty();
+    }
+  }
+
+  function updateWallGhostFast(
+    start: { x: number; z: number },
+    end: { x: number; z: number },
+    isColliding: boolean
+  ) {
+    const dx = end.x - start.x;
+    const dz = end.z - start.z;
+    const length = Math.hypot(dx, dz);
+    if (length < 1) return;
+    const height = activeWallHeight;
+    if (!wallGhostMesh) {
+      wallGhostMaterial = new THREE.MeshStandardMaterial({
+        color: 0x4488ff, transparent: true, opacity: 0.45,
+        emissive: new THREE.Color(0x2244ff), emissiveIntensity: 0.3
+      });
+      const geo = new THREE.BoxGeometry(1, height, WALL_THICKNESS);
+      wallGhostMesh = new THREE.Mesh(geo, wallGhostMaterial);
+      scene.add(wallGhostMesh);
+    }
+    const cx = (start.x + end.x) / 2;
+    const cz = (start.z + end.z) / 2;
+    wallGhostMesh.scale.set(length, 1, 1);
+    wallGhostMesh.position.set(cx, height / 2, cz);
+    wallGhostMesh.rotation.y = -Math.atan2(dz, dx);
+    wallGhostMaterial!.color.set(isColliding ? 0xff2222 : 0x4488ff);
+    wallGhostMaterial!.emissive.set(isColliding ? 0x880000 : 0x2244ff);
+    wallGhostMaterial!.needsUpdate = true;
+    markSceneDirty();
+  }
+
+  function segmentsIntersect2D(
+    a1: { x: number; z: number }, a2: { x: number; z: number },
+    b1: { x: number; z: number }, b2: { x: number; z: number }
+  ): boolean {
+    const dax = a2.x - a1.x, daz = a2.z - a1.z;
+    const dbx = b2.x - b1.x, dbz = b2.z - b1.z;
+    const cross = dax * dbz - daz * dbx;
+    if (Math.abs(cross) < 1e-9) return false;
+    const dx = b1.x - a1.x, dz = b1.z - a1.z;
+    const t = (dx * dbz - dz * dbx) / cross;
+    const u = (dx * daz - dz * dax) / cross;
+    // Allow touching at endpoints (t≈0 or t≈1) — only block actual crossing
+    return t > 0.05 && t < 0.95 && u > 0.05 && u < 0.95;
+  }
+
+  function wallGhostCollides(
+    start: { x: number; z: number },
+    end: { x: number; z: number }
+  ): boolean {
+    const floor = get(activeFloor);
+    if (!floor) return false;
+    for (const w of floor.walls) {
+      if (segmentsIntersect2D(start, end, { x: w.start.x, z: w.start.y }, { x: w.end.x, z: w.end.y })) {
+        return true;
+      }
+    }
+    // Also check proximity to stairs/columns
+    const midX = (start.x + end.x) / 2;
+    const midZ = (start.z + end.z) / 2;
+    for (const s of floor.stairs ?? []) {
+      if (Math.hypot(s.position.x - midX, s.position.y - midZ) < 80) return true;
+    }
+    for (const c of floor.columns ?? []) {
+      if (Math.hypot(c.position.x - midX, c.position.y - midZ) < 40) return true;
+    }
+    return false;
+  }
+
+  function clearWallDrawingState() {
+    wallDrawStart = null;
+    curvedWallStart = null;
+    curvedWallEnd = null;
+    curvedWallPhase = 0;
+    dim3DActive = false;
+    removeWallGhost();
+  }
+
+  function projectWallStartToScreen(pt: { x: number; z: number }) {
+    if (!renderer || !camera) return;
+    const world = new THREE.Vector3(pt.x, 0, pt.z);
+    world.project(camera);
+    const rect = renderer.domElement.getBoundingClientRect();
+    dim3DScreenX = ((world.x + 1) / 2) * rect.width + rect.left - rect.left;
+    dim3DScreenY = ((-world.y + 1) / 2) * rect.height + rect.top - rect.top;
+  }
+
+  function handleStraightWallClick(pt: { x: number; z: number }) {
+    if (!wallDrawStart) {
+      wallDrawStart = pt;
+      projectWallStartToScreen(pt);
+      dim3DActive = true;
+    } else {
+      commitStraightWall(pt);
+    }
+  }
+
+  function commitStraightWall(pt: { x: number; z: number }) {
+    if (!wallDrawStart) return;
+    const snapped = angleSnap3D(wallDrawStart, pt);
+    const collides = wallGhostCollides(wallDrawStart, snapped);
+    if (collides) return;
+    const wallId = addWall(
+      { x: wallDrawStart.x, y: wallDrawStart.z },
+      { x: snapped.x, y: snapped.z }
+    );
+    if (activeWallSubType === 'half') {
+      updateWall(wallId, { height: activeWallHeight });
+    }
+    // Chain: next wall starts from this endpoint
+    wallDrawStart = snapped;
+    projectWallStartToScreen(snapped);
+    // dim3DActive stays true for chained segments
+    removeWallGhost();
+    markSceneDirty();
+  }
+
+  function onDim3DCommit(mm: number) {
+    if (!wallDrawStart) return;
+    const lengthCm = mm / 10;
+    const dx = lastFloorHitPos.x - wallDrawStart.x;
+    const dz = lastFloorHitPos.z - wallDrawStart.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    let endX: number, endZ: number;
+    if (dist < 1) {
+      // No meaningful cursor direction — default rightward
+      endX = wallDrawStart.x + lengthCm;
+      endZ = wallDrawStart.z;
+    } else {
+      endX = wallDrawStart.x + (dx / dist) * lengthCm;
+      endZ = wallDrawStart.z + (dz / dist) * lengthCm;
+    }
+    const endpoint = { x: endX, z: endZ };
+    const snapped = angleSnap3D(wallDrawStart, endpoint);
+    if (!wallGhostCollides(wallDrawStart, snapped)) {
+      const wallId = addWall(
+        { x: wallDrawStart.x, y: wallDrawStart.z },
+        { x: snapped.x, y: snapped.z }
+      );
+      if (activeWallSubType === 'half') updateWall(wallId, { height: activeWallHeight });
+      wallDrawStart = snapped;
+      projectWallStartToScreen(snapped);
+      removeWallGhost();
+      markSceneDirty();
+    }
+  }
+
+  function handleCurvedWallClick(pt: { x: number; z: number }) {
+    if (curvedWallPhase === 0) {
+      curvedWallStart = pt;
+      curvedWallPhase = 1;
+    } else if (curvedWallPhase === 1) {
+      curvedWallEnd = pt;
+      curvedWallPhase = 2;
+    } else if (curvedWallPhase === 2 && curvedWallStart && curvedWallEnd) {
+      const wallId = addWall(
+        { x: curvedWallStart.x, y: curvedWallStart.z },
+        { x: curvedWallEnd.x, y: curvedWallEnd.z }
+      );
+      updateWall(wallId, {
+        curvePoint: { x: pt.x, y: pt.z },
+        height: activeWallHeight,
+      });
+      curvedWallStart = null;
+      curvedWallEnd = null;
+      curvedWallPhase = 0;
+      removeWallGhost();
+      markSceneDirty();
+    }
+  }
+
+  function handleWallDrawingMove(pt: { x: number; z: number }) {
+    if (!wallDrawStart) return;
+    const snapped = angleSnap3D(wallDrawStart, pt);
+    const collides = wallGhostCollides(wallDrawStart, snapped);
+    updateWallGhostFast(wallDrawStart, snapped, collides);
+  }
+
+  // ── Resize handle helpers ───────────────────────────────────────────────────
+  function createResizeHandles(furnitureId: string) {
+    if (!handleGroup) return;
+    // Clear existing handle meshes
+    while (handleGroup.children.length > 0) {
+      const c = handleGroup.children[0];
+      (c as THREE.Mesh).geometry?.dispose();
+      ((c as THREE.Mesh).material as THREE.Material)?.dispose();
+      handleGroup.remove(c);
+    }
+    handleMeshMap.clear();
+
+    let furObj: THREE.Object3D | null = null;
+    wallGroup.traverse(obj => {
+      if (!furObj && obj.userData.furnitureId === furnitureId && obj.parent === wallGroup) furObj = obj;
+    });
+    if (!furObj) { handleGroup.visible = false; return; }
+
+    const box = new THREE.Box3().setFromObject(furObj);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const halfW = size.x / 2;
+    const halfD = size.z / 2;
+
+    const resizeMat = new THREE.MeshStandardMaterial({
+      color: 0x3388ff, emissive: new THREE.Color(0x3388ff), emissiveIntensity: 0.5, transparent: true, opacity: 0.85
+    });
+    const rotateMat = new THREE.MeshStandardMaterial({
+      color: 0xff8800, emissive: new THREE.Color(0xff8800), emissiveIntensity: 0.5, transparent: true, opacity: 0.85
+    });
+
+    const corners: { type: Handle3DType; dx: number; dz: number }[] = [
+      { type: 'resize-tl', dx: -1, dz: -1 },
+      { type: 'resize-tr', dx:  1, dz: -1 },
+      { type: 'resize-bl', dx: -1, dz:  1 },
+      { type: 'resize-br', dx:  1, dz:  1 },
+    ];
+    const HS = 14; // handle size
+    for (const c of corners) {
+      const geo = new THREE.BoxGeometry(HS, HS, HS);
+      const mesh = new THREE.Mesh(geo, resizeMat);
+      mesh.position.set(center.x + c.dx * halfW, center.y, center.z + c.dz * halfD);
+      mesh.userData.handleType = c.type;
+      mesh.userData.furnitureId = furnitureId;
+      handleGroup.add(mesh);
+      handleMeshMap.set(c.type, mesh);
+    }
+
+    // Rotation ring above the object
+    const ringR = Math.max(halfW, halfD) + 20;
+    const ringGeo = new THREE.RingGeometry(ringR, ringR + 10, 32);
+    const ringMesh = new THREE.Mesh(ringGeo, rotateMat);
+    ringMesh.rotation.x = -Math.PI / 2;
+    ringMesh.position.set(center.x, center.y + size.y / 2 + 8, center.z);
+    ringMesh.userData.handleType = 'rotate';
+    ringMesh.userData.furnitureId = furnitureId;
+    handleGroup.add(ringMesh);
+    handleMeshMap.set('rotate', ringMesh);
+
+    handleGroup.visible = true;
+    markSceneDirty();
+  }
+
+  function repositionHandles(furnitureId: string) {
+    if (!handleGroup || !handleGroup.visible) return;
+    let furObj: THREE.Object3D | null = null;
+    wallGroup.traverse(obj => {
+      if (!furObj && obj.userData.furnitureId === furnitureId && obj.parent === wallGroup) furObj = obj;
+    });
+    if (!furObj) return;
+    const box = new THREE.Box3().setFromObject(furObj);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const halfW = size.x / 2;
+    const halfD = size.z / 2;
+    const corners: { type: Handle3DType; dx: number; dz: number }[] = [
+      { type: 'resize-tl', dx: -1, dz: -1 },
+      { type: 'resize-tr', dx:  1, dz: -1 },
+      { type: 'resize-bl', dx: -1, dz:  1 },
+      { type: 'resize-br', dx:  1, dz:  1 },
+    ];
+    for (const c of corners) {
+      const m = handleMeshMap.get(c.type);
+      if (m) m.position.set(center.x + c.dx * halfW, center.y, center.z + c.dz * halfD);
+    }
+    const ringR = Math.max(halfW, halfD) + 20;
+    const rotMesh = handleMeshMap.get('rotate');
+    if (rotMesh) {
+      rotMesh.position.set(center.x, center.y + size.y / 2 + 8, center.z);
+      // Update ring radius by rescaling
+      rotMesh.scale.set(ringR / (Math.max(halfW, halfD) + 20 || 1), 1, 1);
+    }
+    markSceneDirty();
+  }
+
+  function hideResizeHandles() {
+    if (!handleGroup) return;
+    handleGroup.visible = false;
+    markSceneDirty();
   }
 
   function createDoorWindowGhost(type: 'door' | 'window', doorType?: Door['type']) {
@@ -1258,6 +2159,9 @@
   function updateGridVisibility() {
     if (!gridHelper) return;
     const shouldShow = activePlacementType !== 'none' || selectedFurnitureId !== null;
+    const mat = gridHelper.material as THREE.LineBasicMaterial;
+    mat.depthTest = !shouldShow;      // draw on top of floor when visible
+    gridHelper.renderOrder = shouldShow ? 999 : 0;
     if (gridHelper.visible !== shouldShow) {
       gridHelper.visible = shouldShow;
       markSceneDirty();
@@ -1266,7 +2170,11 @@
 
   function updateSelectionBox() {
     if (selectionBoxHelper) { scene.remove(selectionBoxHelper); selectionBoxHelper = null; }
-    if (!selectedFurnitureId) { updateGridVisibility(); return; }
+    if (!selectedFurnitureId) {
+      hideResizeHandles();
+      updateGridVisibility();
+      return;
+    }
     wallGroup.traverse((obj: any) => {
       if (!selectionBoxHelper && obj.userData?.furnitureId === selectedFurnitureId && obj.parent === wallGroup) {
         selectionBoxHelper = new THREE.BoxHelper(obj as THREE.Object3D, new THREE.Color(0x3388ff));
@@ -1274,6 +2182,7 @@
         scene.add(selectionBoxHelper);
       }
     });
+    createResizeHandles(selectedFurnitureId);
     updateGridVisibility();
     markSceneDirty();
   }
@@ -1282,14 +2191,14 @@
     const floor = get(activeFloor);
     const wall = floor?.walls.find((w: Wall) => w.id === wallId);
     if (!wall) return 0.5;
-    const wx = wall.end.x - wall.start.x;
-    const wz = wall.end.y - wall.start.y;
-    const wallLen = Math.sqrt(wx * wx + wz * wz);
+    const wallLen = Math.hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y);
     if (wallLen < 1) return 0.5;
-    const hx = hitPoint.x - wall.start.x;
-    const hz = hitPoint.z - wall.start.y;
-    const dot = (hx * wx + hz * wz) / wallLen;
-    return Math.max(0.05, Math.min(0.95, dot / wallLen));
+    // Project cursor onto wall line segment from wall.start using dot product
+    const toHit = new THREE.Vector3(hitPoint.x - wall.start.x, 0, hitPoint.z - wall.start.y);
+    const wallDir = new THREE.Vector3(wall.end.x - wall.start.x, 0, wall.end.y - wall.start.y).normalize();
+    const rawDot = toHit.dot(wallDir); // cm along wall from start — correct for any angle
+    const snappedDot = snap3D(rawDot);
+    return Math.max(0.05, Math.min(0.95, snappedDot / wallLen));
   }
 
   function enterPlacementMode(type: PlacementType) {
@@ -1300,6 +2209,7 @@
     else if (type === 'window') createDoorWindowGhost('window');
     else if (type === 'stair') createStructureGhost('stair');
     else if (type === 'column') createStructureGhost('column', activeColumnShape);
+    else if (type === 'wall') clearWallDrawingState();
     updateGridVisibility();
     markSceneDirty();
   }
@@ -1308,12 +2218,17 @@
     activePlacementType = 'none';
     furniturePlacementMode = false;
     selectedCatalogId = null;
+    placementPhase = 0;
+    lockedPlacementPos = null;
     removeGhostPreview();
+    clearWallDrawingState();
+    hideResizeHandles();
     // Clear the placement signals so BuildPanel knows placement ended
     placingFurnitureId.set(null);
     placingStair.set(false);
     placingColumn.set(false);
     placingRoomPresetId.set(null);
+    selectedTool.set('select');
     updateGridVisibility();
     markSceneDirty();
   }
@@ -1323,17 +2238,169 @@
   function setCollabOutline(objectId: string | null) {
     if (collabOutlineHelper) { scene.remove(collabOutlineHelper); collabOutlineHelper = null; }
     if (!objectId) { markSceneDirty(); return; }
-    wallGroup.traverse((obj: any) => {
-      if (!collabOutlineHelper && obj.userData?.furnitureId === objectId && obj.parent === wallGroup) {
-        collabOutlineHelper = new THREE.BoxHelper(obj as THREE.Object3D, new THREE.Color(0xf59e0b));
-        scene.add(collabOutlineHelper);
-      }
-      // Also try wallId
-      if (!collabOutlineHelper && obj.userData?.wallId === objectId && (obj as THREE.Mesh).isMesh) {
-        collabOutlineHelper = new THREE.BoxHelper(obj as THREE.Object3D, new THREE.Color(0xf59e0b));
-        scene.add(collabOutlineHelper);
+
+    scene.traverse((obj: any) => {
+      if (collabOutlineHelper) return;
+      if (!(obj as THREE.Mesh).isMesh) return;
+      const id =
+        obj.userData?.furnitureId ??
+        obj.userData?.wallId ??
+        obj.userData?.doorId ??
+        obj.userData?.windowId ??
+        obj.uuid;
+      if (id !== objectId) return;
+
+      const mesh = obj as THREE.Mesh;
+      mesh.updateWorldMatrix(true, false);
+      const edges = new THREE.EdgesGeometry(mesh.geometry);
+      const lineMat = new THREE.LineBasicMaterial({
+        color: HIGHLIGHT_COLOR,
+        transparent: false,
+        depthTest: false,
+      });
+      collabOutlineHelper = new THREE.LineSegments(edges, lineMat);
+      collabOutlineHelper.applyMatrix4(mesh.matrixWorld);
+      collabOutlineHelper.renderOrder = 998;
+      scene.add(collabOutlineHelper);
+    });
+    markSceneDirty();
+  }
+
+  function setCollabHover(objectId: string | null) {
+    if (collabHoverOutline) { scene.remove(collabHoverOutline); collabHoverOutline = null; }
+    if (!objectId || objectId === collabSelectedObjectId) { markSceneDirty(); return; }
+
+    scene.traverse((obj: any) => {
+      if (collabHoverOutline) return;
+      if (!(obj as THREE.Mesh).isMesh) return;
+      const id = obj.userData?.furnitureId ?? obj.userData?.wallId ?? obj.uuid;
+      if (id !== objectId) return;
+
+      const mesh = obj as THREE.Mesh;
+      mesh.updateWorldMatrix(true, false);
+      const edges = new THREE.EdgesGeometry(mesh.geometry);
+      const lineMat = new THREE.LineBasicMaterial({
+        color: HIGHLIGHT_COLOR,
+        transparent: true,
+        opacity: HOVER_OUTLINE_OPACITY,
+        depthTest: false,
+      });
+      collabHoverOutline = new THREE.LineSegments(edges, lineMat);
+      collabHoverOutline.applyMatrix4(mesh.matrixWorld);
+      collabHoverOutline.renderOrder = 997;
+      scene.add(collabHoverOutline);
+    });
+    markSceneDirty();
+  }
+
+  function enterFocusMode(objectId: string, commentText: string) {
+    if (!scene || !camera) return;
+
+    // Find the target object — search by named IDs then by uuid
+    let targetObj: THREE.Object3D | null = null;
+    scene.traverse((obj: any) => {
+      if (targetObj) return;
+      if (obj.userData?.furnitureId === objectId && (obj as THREE.Mesh).isMesh) targetObj = obj;
+      else if (obj.userData?.wallId === objectId && (obj as THREE.Mesh).isMesh) targetObj = obj;
+      else if ((obj as THREE.Mesh).isMesh && obj.uuid === objectId) targetObj = obj;
+    });
+
+    // Dim all meshes to 30% (70% dark) and save originals
+    meshOriginalOpacity.clear();
+    scene.traverse((obj: any) => {
+      if (!(obj as THREE.Mesh).isMesh) return;
+      const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
+      if (!mat) return;
+      meshOriginalOpacity.set(obj.uuid, { opacity: mat.opacity, transparent: mat.transparent });
+      if (obj !== targetObj) {
+        mat.transparent = true;
+        mat.opacity = 0.15;
+        mat.needsUpdate = true;
       }
     });
+
+    // Apply indigo emissive glow to the focused object (or its mesh children)
+    if (targetObj) {
+      const applyEmissive = (obj: THREE.Object3D) => {
+        if ((obj as THREE.Mesh).isMesh) {
+          const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
+          if (mat && mat.emissive !== undefined) {
+            // Store original emissive intensity under uuid + '_emissive' key
+            meshOriginalOpacity.set(obj.uuid + '_emissive', {
+              opacity: mat.emissiveIntensity ?? 0,
+              transparent: false,
+            });
+            mat.emissive = new THREE.Color(0x4f46e5); // indigo
+            mat.emissiveIntensity = 0.35;
+            mat.needsUpdate = true;
+          }
+        }
+        obj.children.forEach(applyEmissive);
+      };
+      applyEmissive(targetObj);
+    }
+
+    // Zoom camera toward the object
+    if (targetObj) {
+      preFocusCameraPos = camera.position.clone();
+      preFocusTarget = controls.target.clone();
+      const box = new THREE.Box3().setFromObject(targetObj);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const dist = Math.max(maxDim * 2.5, 1.5);
+      const dir = camera.position.clone().sub(center).normalize();
+      controls.target.copy(center);
+      camera.position.copy(center.clone().add(dir.multiplyScalar(dist)));
+      controls.update();
+    }
+
+    focusCommentText = commentText;
+    focusMode = true;
+    markSceneDirty();
+  }
+
+  function exitFocusMode() {
+    // Restore mesh opacities and emissive values
+    scene.traverse((obj: any) => {
+      if (!(obj as THREE.Mesh).isMesh) return;
+      const mat = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial;
+      if (!mat) return;
+
+      const saved = meshOriginalOpacity.get(obj.uuid);
+      if (saved) {
+        mat.opacity = saved.opacity;
+        mat.transparent = saved.transparent;
+        mat.needsUpdate = true;
+      }
+
+      const savedEmissive = meshOriginalOpacity.get(obj.uuid + '_emissive');
+      if (savedEmissive && mat.emissive !== undefined) {
+        mat.emissive = new THREE.Color(0x000000);
+        mat.emissiveIntensity = savedEmissive.opacity;
+        mat.needsUpdate = true;
+      }
+    });
+    meshOriginalOpacity.clear();
+
+    // Restore camera
+    if (preFocusCameraPos && preFocusTarget) {
+      camera.position.copy(preFocusCameraPos);
+      controls.target.copy(preFocusTarget);
+      controls.update();
+      preFocusCameraPos = null;
+      preFocusTarget = null;
+    }
+
+    // Clear hover outline too
+    if (collabHoverOutline) { scene.remove(collabHoverOutline); collabHoverOutline = null; }
+    collabHoveredObjectId = null;
+
+    focusMode = false;
+    focusCommentText = '';
+    highlightedCommentObjectId.set(null);
+    focusedCommentId.set(null);
+    setCollabOutline(null);
     markSceneDirty();
   }
 
@@ -1347,7 +2414,8 @@
   }
 
   function autoCenterCamera(floor: Floor) {
-    if (floor.walls.length === 0) return;
+    if (cameraInitialized || floor.walls.length === 0) return;
+    cameraInitialized = true;
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
     for (const w of floor.walls) {
       for (const p of [w.start, w.end]) {
@@ -1590,27 +2658,47 @@
       // Curved wall handling
       if (wall.curvePoint) {
         const h = wall.height;
-        const t = Math.max(wall.thickness, WALL_THICKNESS);
+        const t = normalizeWallThickness ? 30 : Math.max(wall.thickness, WALL_THICKNESS);
         const SEGS = 16;
-        const materials = [
-          exteriorMat, exteriorMat,
-          interiorMat, interiorMat,
-          interiorMat, exteriorMat,
-        ];
+        const tileSizeCm = 200;
+        // Pre-compute arc segment lengths for UV continuity
+        const segData: Array<{ p0x: number; p0y: number; p1x: number; p1y: number; segLen: number }> = [];
+        let totalArc = 0;
         for (let i = 0; i < SEGS; i++) {
-          const t0 = i / SEGS;
-          const t1 = (i + 1) / SEGS;
+          const t0 = i / SEGS, t1 = (i + 1) / SEGS;
           const mt0 = 1 - t0, mt1 = 1 - t1;
           const p0x = mt0*mt0*wall.start.x + 2*mt0*t0*wall.curvePoint.x + t0*t0*wall.end.x;
           const p0y = mt0*mt0*wall.start.y + 2*mt0*t0*wall.curvePoint.y + t0*t0*wall.end.y;
           const p1x = mt1*mt1*wall.start.x + 2*mt1*t1*wall.curvePoint.x + t1*t1*wall.end.x;
           const p1y = mt1*mt1*wall.start.y + 2*mt1*t1*wall.curvePoint.y + t1*t1*wall.end.y;
           const segLen = Math.hypot(p1x - p0x, p1y - p0y);
-          if (segLen < 0.5) continue;
-          const segAngle = Math.atan2(p1y - p0y, p1x - p0x);
-          const segCx = (p0x + p1x) / 2;
-          const segCy = (p0y + p1y) / 2;
-          const geo = new THREE.BoxGeometry(segLen, h, t);
+          segData.push({ p0x, p0y, p1x, p1y, segLen });
+          totalArc += segLen;
+        }
+        let arcSoFar = 0;
+        for (const seg of segData) {
+          if (seg.segLen < 0.5) { arcSoFar += seg.segLen; continue; }
+          const segAngle = Math.atan2(seg.p1y - seg.p0y, seg.p1x - seg.p0x);
+          const segCx = (seg.p0x + seg.p1x) / 2;
+          const segCy = (seg.p0y + seg.p1y) / 2;
+          const geo = new THREE.BoxGeometry(seg.segLen, h, t);
+          // Per-segment materials with arc-normalized UV — clone textures to avoid shared state corruption
+          function makeArcMat(base: THREE.MeshStandardMaterial): THREE.MeshStandardMaterial {
+            if (!base.map) return base;
+            const clonedTex = base.map.clone();
+            clonedTex.needsUpdate = true;
+            clonedTex.repeat.set(seg.segLen / tileSizeCm, h / tileSizeCm);
+            clonedTex.offset.set(arcSoFar / tileSizeCm, 0);
+            clonedTex.wrapS = THREE.RepeatWrapping;
+            clonedTex.wrapT = THREE.RepeatWrapping;
+            const m = base.clone();
+            m.map = clonedTex;
+            m.needsUpdate = true;
+            return m;
+          }
+          const extMatSeg = makeArcMat(exteriorMat);
+          const intMatSeg = makeArcMat(interiorMat);
+          const materials = [extMatSeg, extMatSeg, intMatSeg, intMatSeg, intMatSeg, extMatSeg];
           const mesh = new THREE.Mesh(geo, materials);
           mesh.castShadow = true;
           mesh.receiveShadow = true;
@@ -1619,6 +2707,7 @@
           mesh.userData.wallId = wall.id;
           wallMeshMap.set(mesh, wall.id);
           wallGroup.add(mesh);
+          arcSoFar += seg.segLen;
         }
         // Baseboard for curved wall
         for (let i = 0; i < SEGS; i++) {
@@ -1647,86 +2736,90 @@
       if (len < 1) continue;
 
       const h = wall.height;
-      const t = Math.max(wall.thickness, WALL_THICKNESS);
+      const t = normalizeWallThickness ? 30 : Math.max(wall.thickness, WALL_THICKNESS);
       const angle = Math.atan2(dy, dx);
       const cx = (wall.start.x + wall.end.x) / 2;
       const cy = (wall.start.y + wall.end.y) / 2;
 
       const doorOpenings = floor.doors.filter((d) => d.wallId === wall.id);
       const winOpenings = floor.windows.filter((w) => w.wallId === wall.id);
-      const segments = buildWallSegments(len, h, t, doorOpenings, winOpenings);
+      const spans = computeWallSpans(len, doorOpenings, winOpenings);
 
-      for (const seg of segments) {
-        const geo = new THREE.BoxGeometry(seg.width, seg.height, t);
+      const openingMats = [interiorMat, interiorMat, exteriorMat];
+      const tileSizeCm = 200;
 
-        // Create a multi-material wall: interior white, exterior brown
-        const materials = [
-          exteriorMat, exteriorMat, // left, right
-          interiorMat, interiorMat, // top, bottom
-          interiorMat, exteriorMat, // front (interior), back (exterior)
-        ];
-        const mesh = new THREE.Mesh(geo, materials);
+      // Build per-span material with arc-offset texture so tiling stays continuous across spans
+      function makeSpanMat(base: THREE.MeshStandardMaterial, spanW: number, spanStart: number): THREE.MeshStandardMaterial {
+        if (!base.map) return base; // color-only: no UV issue, reuse as-is
+        const clonedTex = base.map.clone();
+        clonedTex.needsUpdate = true;
+        clonedTex.repeat.set(spanW / tileSizeCm, h / tileSizeCm);
+        clonedTex.offset.set(spanStart / tileSizeCm, 0);
+        clonedTex.wrapS = THREE.RepeatWrapping;
+        clonedTex.wrapT = THREE.RepeatWrapping;
+        const m = base.clone();
+        m.map = clonedTex;
+        m.needsUpdate = true;
+        return m;
+      }
+
+      for (const span of spans) {
+        const spanW = span.endCm - span.startCm;
+        if (spanW < 0.1) continue;
+        const localX = (span.startCm + span.endCm) / 2 - len / 2;
+        const wx = cx + localX * Math.cos(angle);
+        const wz = cy + localX * Math.sin(angle);
+
+        let geo: THREE.BufferGeometry;
+        let mats: THREE.Material | THREE.Material[];
+        let posY: number;
+
+        if (span.type === 'solid') {
+          const extS = makeSpanMat(exteriorMat, spanW, span.startCm);
+          const intS = makeSpanMat(interiorMat, spanW, span.startCm);
+          geo = new THREE.BoxGeometry(spanW, h, t);
+          mats = [extS, extS, intS, intS, intS, extS];
+          posY = h / 2;
+        } else if (span.type === 'door') {
+          const door = span.opening;
+          const holeLeft  = door.position * len - door.width / 2 - span.startCm;
+          const holeRight = holeLeft + door.width;
+          geo = buildOpeningSpanGeo(spanW, h, t, holeLeft, holeRight, 0, 210);
+          mats = openingMats;
+          posY = 0;
+        } else {
+          const win = span.opening;
+          const holeLeft  = win.position * len - win.width / 2 - span.startCm;
+          const holeRight = holeLeft + win.width;
+          geo = buildOpeningSpanGeo(spanW, h, t, holeLeft, holeRight, win.sillHeight, win.sillHeight + win.height);
+          mats = openingMats;
+          posY = 0;
+        }
+
+        const mesh = new THREE.Mesh(geo, mats);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
-
-        const localX = seg.offsetX - len / 2;
-        mesh.position.set(
-          cx + localX * Math.cos(angle),
-          seg.height / 2 + seg.offsetY,
-          cy + localX * Math.sin(angle)
-        );
+        mesh.position.set(wx, posY, wz);
         mesh.rotation.y = -angle;
         mesh.userData.wallId = wall.id;
+        if (span.type === 'door')   mesh.userData.doorId   = span.opening.id;
+        if (span.type === 'window') mesh.userData.windowId = span.opening.id;
         wallMeshMap.set(mesh, wall.id);
         wallGroup.add(mesh);
       }
 
-      // Baseboard — with gaps at door openings
-      const doorOpeningsForBB = floor.doors.filter((d) => d.wallId === wall.id);
-      if (doorOpeningsForBB.length === 0) {
-        const bbGeo = new THREE.BoxGeometry(len, BASEBOARD_HEIGHT, t + 2);
+      // Baseboard — derived from spans; skip door spans
+      for (const span of spans) {
+        if (span.type === 'door') continue;
+        const spanW = span.endCm - span.startCm;
+        if (spanW < 0.1) continue;
+        const localX = (span.startCm + span.endCm) / 2 - len / 2;
+        const bbGeo = new THREE.BoxGeometry(spanW, BASEBOARD_HEIGHT, t + 2);
         const bbMesh = new THREE.Mesh(bbGeo, baseboardMat);
-        bbMesh.position.set(cx, BASEBOARD_HEIGHT / 2, cy);
+        bbMesh.position.set(cx + localX * Math.cos(angle), BASEBOARD_HEIGHT / 2, cy + localX * Math.sin(angle));
         bbMesh.rotation.y = -angle;
         bbMesh.castShadow = true;
         wallGroup.add(bbMesh);
-      } else {
-        // Build baseboard segments skipping door gaps
-        const sortedDoors = [...doorOpeningsForBB].sort((a, b) => a.position - b.position);
-        let bbCursor = 0;
-        for (const door of sortedDoors) {
-          const dLeft = door.position * len - door.width / 2;
-          const dRight = door.position * len + door.width / 2;
-          if (dLeft > bbCursor) {
-            const segLen = dLeft - bbCursor;
-            const segCenter = bbCursor + segLen / 2 - len / 2;
-            const bbGeo = new THREE.BoxGeometry(segLen, BASEBOARD_HEIGHT, t + 2);
-            const bbMesh = new THREE.Mesh(bbGeo, baseboardMat);
-            bbMesh.position.set(
-              cx + segCenter * Math.cos(angle),
-              BASEBOARD_HEIGHT / 2,
-              cy + segCenter * Math.sin(angle)
-            );
-            bbMesh.rotation.y = -angle;
-            bbMesh.castShadow = true;
-            wallGroup.add(bbMesh);
-          }
-          bbCursor = Math.max(bbCursor, dRight);
-        }
-        if (bbCursor < len) {
-          const segLen = len - bbCursor;
-          const segCenter = bbCursor + segLen / 2 - len / 2;
-          const bbGeo = new THREE.BoxGeometry(segLen, BASEBOARD_HEIGHT, t + 2);
-          const bbMesh = new THREE.Mesh(bbGeo, baseboardMat);
-          bbMesh.position.set(
-            cx + segCenter * Math.cos(angle),
-            BASEBOARD_HEIGHT / 2,
-            cy + segCenter * Math.sin(angle)
-          );
-          bbMesh.rotation.y = -angle;
-          bbMesh.castShadow = true;
-          wallGroup.add(bbMesh);
-        }
       }
     }
 
@@ -1740,42 +2833,7 @@
       const angle = Math.atan2(wall.end.y - wall.start.y, wall.end.x - wall.start.x);
       const wt = Math.max(wall.thickness, WALL_THICKNESS);
 
-      const frameMat = new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.6 });
       const doorHeight = 210;
-      const jamb = 5; // jamb thickness
-
-      // Left jamb
-      const ljGeo = new THREE.BoxGeometry(jamb, doorHeight, wt + 2);
-      const ljMesh = new THREE.Mesh(ljGeo, frameMat);
-      const ljOffset = -door.width / 2 - jamb / 2;
-      ljMesh.position.set(
-        px + ljOffset * Math.cos(angle),
-        doorHeight / 2,
-        py + ljOffset * Math.sin(angle)
-      );
-      ljMesh.rotation.y = -angle;
-      ljMesh.castShadow = true;
-      wallGroup.add(ljMesh);
-
-      // Right jamb
-      const rjMesh = new THREE.Mesh(ljGeo, frameMat);
-      const rjOffset = door.width / 2 + jamb / 2;
-      rjMesh.position.set(
-        px + rjOffset * Math.cos(angle),
-        doorHeight / 2,
-        py + rjOffset * Math.sin(angle)
-      );
-      rjMesh.rotation.y = -angle;
-      rjMesh.castShadow = true;
-      wallGroup.add(rjMesh);
-
-      // Header
-      const hGeo = new THREE.BoxGeometry(door.width + jamb * 2, jamb, wt + 2);
-      const hMesh = new THREE.Mesh(hGeo, frameMat);
-      hMesh.position.set(px, doorHeight + jamb / 2, py);
-      hMesh.rotation.y = -angle;
-      hMesh.castShadow = true;
-      wallGroup.add(hMesh);
 
       // Door panel — hinged on left side, slightly ajar (15°)
       const panelMat = new THREE.MeshStandardMaterial({ color: 0x8B6914, roughness: 0.5 });
@@ -1795,6 +2853,8 @@
       );
       panelMesh.rotation.y = -angle + swingAngle;
       panelMesh.castShadow = true;
+      panelMesh.userData.doorId = door.id;
+      panelMesh.userData.wallId = door.wallId;
       wallGroup.add(panelMesh);
 
       // Door handle (small sphere)
@@ -1810,6 +2870,8 @@
         100,
         panelMesh.position.z - handleLocalX * handleSin
       );
+      handleMesh.userData.doorId = door.id;
+      handleMesh.userData.wallId = door.wallId;
       wallGroup.add(handleMesh);
     }
 
@@ -1825,18 +2887,12 @@
       const winCY = win.sillHeight + win.height / 2;
 
       const frameMat = new THREE.MeshStandardMaterial({ color: 0xe0e0e0, roughness: 0.4, metalness: 0.1 });
-      const mullionW = 4; // mullion bar width
+      const mullionW = 4;
 
-      // Outer frame — 4 bars forming rectangle
+      // Center mullions only — outer frame is provided by ExtrudeGeometry wall reveals
       const bars: { w: number; h: number; ox: number; oy: number }[] = [
-        { w: win.width + mullionW * 2, h: mullionW, ox: 0, oy: -win.height / 2 - mullionW / 2 }, // bottom
-        { w: win.width + mullionW * 2, h: mullionW, ox: 0, oy: win.height / 2 + mullionW / 2 },  // top
-        { w: mullionW, h: win.height, ox: -win.width / 2 - mullionW / 2, oy: 0 },  // left
-        { w: mullionW, h: win.height, ox: win.width / 2 + mullionW / 2, oy: 0 },   // right
-        // Center vertical mullion
-        { w: mullionW, h: win.height, ox: 0, oy: 0 },
-        // Center horizontal mullion
-        { w: win.width, h: mullionW, ox: 0, oy: 0 },
+        { w: mullionW, h: win.height, ox: 0, oy: 0 },   // center vertical
+        { w: win.width, h: mullionW, ox: 0, oy: 0 },    // center horizontal
       ];
       for (const bar of bars) {
         const geo = new THREE.BoxGeometry(bar.w, bar.h, mullionW);
@@ -1847,6 +2903,8 @@
           py + bar.ox * Math.sin(angle)
         );
         mesh.rotation.y = -angle;
+        mesh.userData.windowId = win.id;
+        mesh.userData.wallId = win.wallId;
         wallGroup.add(mesh);
       }
 
@@ -1868,6 +2926,8 @@
             py + ox * Math.sin(angle)
           );
           gMesh.rotation.y = -angle;
+          gMesh.userData.windowId = win.id;
+          gMesh.userData.wallId = win.wallId;
           wallGroup.add(gMesh);
         }
       }
@@ -1878,6 +2938,8 @@
       sillMesh.position.set(px, win.sillHeight - 2, py);
       sillMesh.rotation.y = -angle;
       sillMesh.castShadow = true;
+      sillMesh.userData.windowId = win.id;
+      sillMesh.userData.wallId = win.wallId;
       wallGroup.add(sillMesh);
     }
 
@@ -2034,6 +3096,39 @@
     // Columns
     buildColumns(floor);
 
+    // Corner junction posts — fill seams at wall endpoints and intersections
+    // Build vertex → exterior material map so posts match painted walls
+    const DEFAULT_2D_COLORS_CORNER = ['#cccccc', '#888888', '#444444', '#404040'];
+    const cornerVertexMats = new Map<string, THREE.MeshStandardMaterial>();
+    // Pass 1: unpainted walls (register defaults only if key is empty)
+    for (const wall of floor.walls) {
+      if (wall.exteriorColor || wall.exteriorTexture) continue;
+      for (const pt of [wall.start, wall.end]) {
+        const key = `${Math.round(pt.x)},${Math.round(pt.y)}`;
+        if (!cornerVertexMats.has(key)) {
+          cornerVertexMats.set(key, new THREE.MeshStandardMaterial({ color: 0xd4cfc9, roughness: 0.85 }));
+        }
+      }
+    }
+    // Pass 2: painted walls always overwrite (user intent beats unpainted neighbor)
+    for (const wall of floor.walls) {
+      if (!wall.exteriorColor && !wall.exteriorTexture) continue;
+      const wLen = Math.hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y);
+      let mat: THREE.MeshStandardMaterial;
+      if (wall.exteriorTexture && wall.exteriorTexture !== 'none') {
+        const tex = generateWallTexture(wall.exteriorTexture, wall.exteriorColor || '#888888', wLen, wall.height ?? 280);
+        mat = new THREE.MeshStandardMaterial({ map: tex.clone(), roughness: 0.85 });
+      } else if (wall.exteriorColor && !DEFAULT_2D_COLORS_CORNER.includes(wall.exteriorColor.toLowerCase())) {
+        mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(wall.exteriorColor), roughness: 0.85 });
+      } else {
+        mat = new THREE.MeshStandardMaterial({ color: 0xd4cfc9, roughness: 0.85 });
+      }
+      for (const pt of [wall.start, wall.end]) {
+        cornerVertexMats.set(`${Math.round(pt.x)},${Math.round(pt.y)}`, mat);
+      }
+    }
+    buildWallCorners(floor, wallGroup, 0, 1, cornerVertexMats);
+
     autoCenterCamera(floor);
   }
 
@@ -2132,25 +3227,42 @@
 
       const doorOpenings = floor.doors.filter((d) => d.wallId === wall.id);
       const winOpenings = floor.windows.filter((w) => w.wallId === wall.id);
-      const segments = buildWallSegments(len, h, t, doorOpenings, winOpenings);
+      const spans = computeWallSpans(len, doorOpenings, winOpenings);
 
-      const materials = [
-        defaultExteriorMat, defaultExteriorMat,
-        defaultInteriorMat, defaultInteriorMat,
-        defaultInteriorMat, defaultExteriorMat,
-      ];
+      const solidMats = [defaultExteriorMat, defaultExteriorMat, defaultInteriorMat, defaultInteriorMat, defaultInteriorMat, defaultExteriorMat];
+      const openingMats = [defaultInteriorMat, defaultInteriorMat, defaultExteriorMat];
 
-      for (const seg of segments) {
-        const geo = new THREE.BoxGeometry(seg.width, seg.height, t);
-        const mesh = new THREE.Mesh(geo, materials);
+      for (const span of spans) {
+        const spanW = span.endCm - span.startCm;
+        if (spanW < 0.1) continue;
+        const localX = (span.startCm + span.endCm) / 2 - len / 2;
+
+        let geo: THREE.BufferGeometry;
+        let mats: THREE.Material | THREE.Material[];
+        let posY: number;
+
+        if (span.type === 'solid') {
+          geo = new THREE.BoxGeometry(spanW, h, t);
+          mats = solidMats;
+          posY = h / 2 + yOffset;
+        } else if (span.type === 'door') {
+          const door = span.opening;
+          const holeLeft = door.position * len - door.width / 2 - span.startCm;
+          geo = buildOpeningSpanGeo(spanW, h, t, holeLeft, holeLeft + door.width, 0, 210);
+          mats = openingMats;
+          posY = yOffset;
+        } else {
+          const win = span.opening;
+          const holeLeft = win.position * len - win.width / 2 - span.startCm;
+          geo = buildOpeningSpanGeo(spanW, h, t, holeLeft, holeLeft + win.width, win.sillHeight, win.sillHeight + win.height);
+          mats = openingMats;
+          posY = yOffset;
+        }
+
+        const mesh = new THREE.Mesh(geo, mats);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
-        const localX = seg.offsetX - len / 2;
-        mesh.position.set(
-          cx + localX * Math.cos(angle),
-          seg.height / 2 + seg.offsetY + yOffset,
-          cy + localX * Math.sin(angle)
-        );
+        mesh.position.set(cx + localX * Math.cos(angle), posY, cy + localX * Math.sin(angle));
         mesh.rotation.y = -angle;
         group.add(mesh);
       }
@@ -2192,9 +3304,14 @@
         group.add(mesh);
       }
     }
+
+    // Corner junction posts (transparent to match floor opacity)
+    buildWallCorners(floor, group, yOffset, opacity);
   }
   
   function autoCenterCameraAllFloors(floorCount: number) {
+    if (cameraInitialized) return;
+    cameraInitialized = true;
     const box = new THREE.Box3().setFromObject(wallGroup);
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
@@ -2210,57 +3327,104 @@
     } else if (currentFloor) {
       buildWalls(currentFloor);
     }
+    // Re-anchor resize handles after wallGroup children are recreated
+    if (selectedFurnitureId) {
+      requestAnimationFrame(() => { if (selectedFurnitureId) createResizeHandles(selectedFurnitureId); });
+    }
+    // Re-apply wall cutoff and rebuild XRefs after scene rebuild
+    if (get(wallCutoffEnabled)) applyWallCutoff(true);
+    rebuildXRefGroup();
     markSceneDirty();
   }
 
-  interface WallSegment {
-    width: number;
-    height: number;
-    offsetX: number;
-    offsetY: number;
-  }
+  // ── Smart Wall: modular span system ─────────────────────────────────────────
+  type WallSpan =
+    | { type: 'solid';  startCm: number; endCm: number }
+    | { type: 'door';   startCm: number; endCm: number; opening: Door }
+    | { type: 'window'; startCm: number; endCm: number; opening: Win };
 
-  function buildWallSegments(
-    wallLen: number, wallH: number, _t: number,
-    doors: Door[], windows: Win[]
-  ): WallSegment[] {
-    type Opening = { pos: number; width: number; bottomY: number; topY: number };
-    const openings: Opening[] = [];
-    for (const d of doors) {
-      openings.push({ pos: d.position * wallLen, width: d.width, bottomY: 0, topY: 210 });
-    }
-    for (const w of windows) {
-      openings.push({ pos: w.position * wallLen, width: w.width, bottomY: w.sillHeight, topY: w.sillHeight + w.height });
-    }
+  function computeWallSpans(wallLen: number, doors: Door[], windows: Win[]): WallSpan[] {
+    type Op = { centerCm: number; halfW: number; kind: 'door' | 'window'; door?: Door; win?: Win };
+    const ops: Op[] = [
+      ...doors.map(d => ({ centerCm: d.position * wallLen, halfW: d.width / 2, kind: 'door' as const, door: d })),
+      ...windows.map(w => ({ centerCm: w.position * wallLen, halfW: w.width / 2, kind: 'window' as const, win: w })),
+    ];
+    ops.sort((a, b) => a.centerCm - b.centerCm);
 
-    if (openings.length === 0) {
-      return [{ width: wallLen, height: wallH, offsetX: wallLen / 2, offsetY: 0 }];
-    }
-
-    openings.sort((a, b) => a.pos - b.pos);
-    const segs: WallSegment[] = [];
+    const spans: WallSpan[] = [];
     let cursor = 0;
 
-    for (const op of openings) {
-      const left = op.pos - op.width / 2;
-      const right = op.pos + op.width / 2;
-      if (left > cursor) {
-        segs.push({ width: left - cursor, height: wallH, offsetX: cursor + (left - cursor) / 2, offsetY: 0 });
-      }
-      if (op.topY < wallH) {
-        segs.push({ width: op.width, height: wallH - op.topY, offsetX: op.pos, offsetY: op.topY });
-      }
-      if (op.bottomY > 0) {
-        segs.push({ width: op.width, height: op.bottomY, offsetX: op.pos, offsetY: 0 });
-      }
+    for (const op of ops) {
+      const left  = Math.max(0, op.centerCm - op.halfW);
+      const right = Math.min(wallLen, op.centerCm + op.halfW);
+      if (right - left < 1) continue;
+      if (left > cursor + 0.1) spans.push({ type: 'solid', startCm: cursor, endCm: left });
+      if (op.kind === 'door')   spans.push({ type: 'door',   startCm: left, endCm: right, opening: op.door! });
+      else                      spans.push({ type: 'window', startCm: left, endCm: right, opening: op.win! });
       cursor = Math.max(cursor, right);
     }
+    if (cursor < wallLen - 0.1) spans.push({ type: 'solid', startCm: cursor, endCm: wallLen });
+    return spans.length > 0 ? spans : [{ type: 'solid', startCm: 0, endCm: wallLen }];
+  }
 
-    if (cursor < wallLen) {
-      segs.push({ width: wallLen - cursor, height: wallH, offsetX: cursor + (wallLen - cursor) / 2, offsetY: 0 });
+  function buildOpeningSpanGeo(
+    spanW: number, wallH: number, wallT: number,
+    holeLeft: number, holeRight: number,
+    holeBottom: number, holeTop: number
+  ): THREE.ExtrudeGeometry {
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0); shape.lineTo(0, wallH);
+    shape.lineTo(spanW, wallH); shape.lineTo(spanW, 0); shape.closePath();
+    const hole = new THREE.Path();
+    hole.moveTo(holeLeft, holeBottom); hole.lineTo(holeLeft, holeTop);
+    hole.lineTo(holeRight, holeTop); hole.lineTo(holeRight, holeBottom); hole.closePath();
+    shape.holes.push(hole);
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: wallT, bevelEnabled: false });
+    geo.translate(-spanW / 2, 0, -wallT / 2);
+    return geo;
+  }
+
+  /**
+   * Spawn a square corner post at every wall vertex to hide seams at L/T/+ junctions.
+   * Using max(height, thickness) of all walls meeting at each vertex so taller/thicker
+   * walls always win. Posts are added to `target` (wallGroup or a temp group).
+   */
+  function buildWallCorners(
+    floor: Floor,
+    target: THREE.Group,
+    yOffset = 0,
+    opacity = 1,
+    vertexMats?: Map<string, THREE.MeshStandardMaterial>
+  ) {
+    const vertices = new Map<string, { x: number; y: number; h: number; t: number }>();
+    for (const wall of floor.walls) {
+      const wallH = wall.height ?? 280;
+      const wallT = normalizeWallThickness ? 30 : Math.max(wall.thickness ?? 15, WALL_THICKNESS);
+      for (const pt of [wall.start, wall.end]) {
+        const key = `${Math.round(pt.x)},${Math.round(pt.y)}`;
+        const existing = vertices.get(key);
+        if (!existing) {
+          vertices.set(key, { x: pt.x, y: pt.y, h: wallH, t: wallT });
+        } else {
+          existing.h = Math.max(existing.h, wallH);
+          existing.t = Math.max(existing.t, wallT);
+        }
+      }
     }
-
-    return segs;
+    const defaultGrayMat = new THREE.MeshStandardMaterial({ color: 0xd4cfc9, roughness: 0.85 });
+    for (const [key, v] of vertices) {
+      const geo = new THREE.BoxGeometry(v.t, v.h, v.t);
+      const baseMat = vertexMats?.get(key) ?? defaultGrayMat;
+      const mat = opacity < 1
+        ? baseMat.clone()
+        : baseMat;
+      if (opacity < 1) { mat.transparent = true; mat.opacity = opacity; mat.needsUpdate = true; }
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(v.x, v.h / 2 + yOffset, v.y);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      target.add(mesh);
+    }
   }
 
   function onKeyDown(event: KeyboardEvent) {
@@ -2283,8 +3447,49 @@
       }
       return;
     }
-    // ESC exits active placement mode, then selection, then edit mode
+    // Enter: commit two-phase placement in rotation phase
+    if (event.code === 'Enter' && placementPhase === 1 && lockedPlacementPos) {
+      const rotation = ghostGroup ? ((-ghostGroup.rotation.y * 180 / Math.PI) + 360) % 360 : 0;
+      const snappedRot = Math.round(rotation / 45) * 45;
+      if (activePlacementType === 'stair') {
+        const id = addStair({ x: lockedPlacementPos.x, y: lockedPlacementPos.z }, activeStairType);
+        updateStair(id, { rotation: snappedRot });
+      } else if (activePlacementType === 'column') {
+        const id = addColumn({ x: lockedPlacementPos.x, y: lockedPlacementPos.z }, activeColumnShape);
+        updateColumn(id, { rotation: snappedRot });
+      } else if (activePlacementType === 'furniture' && selectedCatalogId) {
+        const id = addFurniture(selectedCatalogId, { x: lockedPlacementPos.x, y: lockedPlacementPos.z });
+        updateFurniture(id, { rotation: snappedRot });
+      } else if (activePlacementType === 'room' && activeRoomPresetId) {
+        const preset = roomPresets.find(p => p.id === activeRoomPresetId);
+        if (preset) {
+          const template = activeRoomTemplateName
+            ? roomTemplates.find(t => t.name === activeRoomTemplateName) ?? null : null;
+          placeRoomTemplate(preset, { x: lockedPlacementPos.x, y: lockedPlacementPos.z }, template);
+        }
+      }
+      placementPhase = 0; lockedPlacementPos = null;
+      exitPlacementMode();
+      return;
+    }
+    // ESC: for wall tool, single ESC cancels segment; second ESC exits tool
     if (event.code === 'Escape' && !walkthroughMode) {
+      // ESC during rotation phase: revert to position phase (stay in placement mode)
+      if (placementPhase === 1) {
+        placementPhase = 0;
+        lockedPlacementPos = null;
+        if (ghostGroup) ghostGroup.rotation.y = 0;
+        markSceneDirty();
+        return;
+      }
+      if (activePlacementType === 'wall') {
+        if (wallDrawStart || curvedWallPhase > 0) {
+          clearWallDrawingState();
+        } else {
+          exitPlacementMode();
+        }
+        return;
+      }
       if (activePlacementType !== 'none') {
         exitPlacementMode();
         return;
@@ -2349,29 +3554,162 @@
     }
   }
   
-  function toggleWallTransparency() {
-    wallsTransparent = !wallsTransparent;
+  function applyWallTransparency(transparent: boolean) {
+    wallsTransparent = transparent;
+    if (!wallGroup) return;
     wallGroup.traverse((child) => {
       if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
-        child.material.transparent = wallsTransparent;
-        child.material.opacity = wallsTransparent ? 0.15 : 1.0;
+        child.material.transparent = transparent;
+        child.material.opacity = transparent ? 0.15 : 1.0;
         child.material.needsUpdate = true;
       }
     });
     markSceneDirty();
   }
 
+  function toggleWallTransparency() {
+    const next = !wallsTransparent;
+    wallTransparentStore.set(next);
+    applyWallTransparency(next);
+  }
+
+  function applyWallCutoff(enabled: boolean) {
+    if (!wallGroup) return;
+    const planes = enabled ? [WALL_CUTOFF_PLANE] : [];
+    wallGroup.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of mats as THREE.MeshStandardMaterial[]) {
+        m.clippingPlanes = planes;
+        m.needsUpdate = true;
+      }
+    });
+    markSceneDirty();
+  }
+
+  // ─── XREF 3D rendering ────────────────────────────────────────────────────
+
+  function buildXRefDxf(xref: XRefDxf): THREE.Group {
+    const group = new THREE.Group();
+    const mat = new THREE.LineBasicMaterial({ color: 0x4b8fd4, opacity: xref.opacity, transparent: true });
+    for (const ent of xref.entities) {
+      if (ent.points.length < 2) continue;
+      const pts = ent.points.map(p => new THREE.Vector3(p.x * xref.scale, 0.5, p.y * xref.scale));
+      const geo = new THREE.BufferGeometry().setFromPoints(pts);
+      const line = ent.closed
+        ? new THREE.LineLoop(geo, mat.clone())
+        : new THREE.Line(geo, mat.clone());
+      group.add(line);
+    }
+    group.position.set(xref.position.x, 0, xref.position.y);
+    group.rotation.y = -xref.rotation * Math.PI / 180;
+    group.userData.xrefId = xref.id;
+    return group;
+  }
+
+  function buildXRefNative(xref: XRefNative): THREE.Group {
+    let project: ProjectType;
+    try { project = JSON.parse(xref.sourceJson); } catch { return new THREE.Group(); }
+    const floor = project.floors[xref.floorIndex] ?? project.floors[0];
+    if (!floor) return new THREE.Group();
+    const group = new THREE.Group();
+    const ghostMat = new THREE.MeshStandardMaterial({ color: 0x8899aa, opacity: 0.3, transparent: true, roughness: 0.9 });
+    // Build simple box meshes for each wall
+    for (const wall of floor.walls) {
+      const dx = wall.end.x - wall.start.x;
+      const dy = wall.end.y - wall.start.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1) continue;
+      const h = wall.height ?? 280;
+      const t = wall.thickness ?? 15;
+      const angle = Math.atan2(dy, dx);
+      const geo = new THREE.BoxGeometry(len, h, t);
+      const mesh = new THREE.Mesh(geo, ghostMat.clone());
+      const mx = (wall.start.x + wall.end.x) / 2;
+      const my = (wall.start.y + wall.end.y) / 2;
+      mesh.position.set(mx, h / 2, my);
+      mesh.rotation.y = -angle;
+      mesh.userData.xrefId = xref.id;
+      group.add(mesh);
+    }
+    group.position.set(xref.position.x, xref.positionY, xref.position.y);
+    group.rotation.y = -xref.rotation * Math.PI / 180;
+    group.scale.setScalar(xref.scale);
+    group.userData.xrefId = xref.id;
+    return group;
+  }
+
+  function rebuildXRefGroup() {
+    if (!xrefGroup) return;
+    xrefGroup.clear();
+    const floor = currentFloor;
+    if (!floor?.xrefs) return;
+    for (const xref of floor.xrefs) {
+      if (!xref.visible) continue;
+      if (xref.type === 'dxf') xrefGroup.add(buildXRefDxf(xref as XRefDxf));
+      else xrefGroup.add(buildXRefNative(xref as XRefNative));
+    }
+    markSceneDirty();
+  }
+
   function viewTopDown() {
-    // Calculate center of the plan
     const box = new THREE.Box3().setFromObject(wallGroup);
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.z, 500);
-    
-    // Animate camera to top-down position
     camera.position.set(center.x, maxDim * 1.5, center.z);
     controls.target.set(center.x, 0, center.z);
     controls.update();
+    markSceneDirty();
+  }
+
+  function viewFront() {
+    const box = new THREE.Box3().setFromObject(wallGroup);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 500);
+    camera.position.set(center.x, center.y + 100, center.z + maxDim * 1.5);
+    controls.target.set(center.x, center.y, center.z);
+    controls.update();
+    markSceneDirty();
+  }
+
+  function viewSide() {
+    const box = new THREE.Box3().setFromObject(wallGroup);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 500);
+    camera.position.set(center.x + maxDim * 1.5, center.y + 100, center.z);
+    controls.target.set(center.x, center.y, center.z);
+    controls.update();
+    markSceneDirty();
+  }
+
+  function viewIsometric() {
+    const box = new THREE.Box3().setFromObject(wallGroup);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.z, 500);
+    const dist = maxDim * 1.2;
+    camera.position.set(center.x + dist, dist * 0.8, center.z + dist);
+    controls.target.set(center.x, 0, center.z);
+    controls.update();
+    markSceneDirty();
+  }
+
+  function viewExploded() {
+    // Show all floors stacked and switch to isometric
+    showAllFloors = true;
+    rebuildScene();
+    const box = new THREE.Box3().setFromObject(wallGroup);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.z, 500);
+    const dist = maxDim * 1.5;
+    camera.position.set(center.x + dist, dist * 1.2, center.z + dist);
+    controls.target.set(center.x, center.y, center.z);
+    controls.update();
+    markSceneDirty();
   }
 
   function toggleWalkthroughMode() {
@@ -2514,7 +3852,13 @@
 
     const unsub = activeFloor.subscribe((f) => {
       currentFloor = f;
-      if (f) rebuildScene();
+      if (f) {
+        if (f.id !== lastCameraFloorId) {
+          cameraInitialized = false;
+          lastCameraFloorId = f.id;
+        }
+        rebuildScene();
+      }
     });
 
     const unsubRooms = detectedRoomsStore.subscribe((rooms) => {
@@ -2564,9 +3908,18 @@
       canEdit = user.permissionLevel === 'full';
     });
 
-    // Collab panel → highlight object in 3D
+    // Collab panel → highlight object in 3D + focus mode
     const unsubHighlight = highlightedCommentObjectId.subscribe(id => {
-      if (collaborationMode) setCollabOutline(id);
+      if (!collaborationMode) return;
+      setCollabOutline(id);
+      if (id) {
+        // Find the comment text for the banner
+        const allComments = get(comments3D);
+        const c = allComments.find(c => c.objectId === id);
+        enterFocusMode(id, c?.text ?? '');
+      } else if (focusMode) {
+        exitFocusMode();
+      }
     });
 
     // React to placement signals from BuildPanel
@@ -2592,8 +3945,17 @@
     });
 
     const unsubPlacingStair = placingStair.subscribe((v) => {
-      if (v) { enterPlacementMode('stair'); }
-      else if (activePlacementType === 'stair') { activePlacementType = 'none'; removeGhostPreview(); updateGridVisibility(); }
+      if (v) {
+        activeStairType = get(placingStairType);
+        enterPlacementMode('stair');
+      } else if (activePlacementType === 'stair') {
+        activePlacementType = 'none'; removeGhostPreview(); updateGridVisibility();
+      }
+    });
+
+    const unsubPlacingStairType = placingStairType.subscribe((st) => {
+      activeStairType = st;
+      if (activePlacementType === 'stair') { removeGhostPreview(); createStructureGhost('stair'); }
     });
 
     const unsubPlacingColumn = placingColumn.subscribe((v) => {
@@ -2619,13 +3981,26 @@
     });
 
     const unsubSelectedTool = selectedTool.subscribe((tool) => {
-      if (tool === 'door') {
+      if (tool === 'wall') {
+        activeWallSubType = get(placingWallSubType);
+        activeWallHeight = get(placingWallHeight);
+        enterPlacementMode('wall');
+      } else if (tool === 'door') {
         enterPlacementMode('door');
       } else if (tool === 'window') {
         enterPlacementMode('window');
-      } else if (activePlacementType === 'door' || activePlacementType === 'window') {
-        activePlacementType = 'none'; removeGhostPreview(); updateGridVisibility();
+      } else if (activePlacementType === 'door' || activePlacementType === 'window' || activePlacementType === 'wall') {
+        exitPlacementMode();
       }
+    });
+
+    const unsubWallSubType = placingWallSubType.subscribe(st => {
+      activeWallSubType = st;
+      if (activePlacementType === 'wall') clearWallDrawingState();
+    });
+
+    const unsubWallHeight = placingWallHeight.subscribe(h => {
+      activeWallHeight = h;
     });
 
     const unsubPlacingRoom = placingRoomPresetId.subscribe((id) => {
@@ -2635,13 +4010,38 @@
         activePlacementType = 'room';
         editMode = true;
         if (walkthroughMode) exitWalkthroughMode();
-        // Simple crosshair ghost
+        // Room footprint ghost — uses preset.getWalls() for authentic polygon shape
         removeGhostPreview();
-        const mat = new THREE.MeshStandardMaterial({ color: 0x4488ff, transparent: true, opacity: 0.5, emissive: new THREE.Color(0x2244ff), emissiveIntensity: 0.4 });
-        const ringGeo = new THREE.RingGeometry(40, 50, 32);
-        const ring = new THREE.Mesh(ringGeo, mat);
-        ring.rotation.x = -Math.PI / 2;
-        const g = new THREE.Group(); g.add(ring); g.visible = false;
+        const ghostPreset = roomPresets.find(p => p.id === id);
+        const W = 400, H = 300; // default room dims
+        const presetWalls = ghostPreset ? ghostPreset.getWalls(W, H) : [];
+        const g = new THREE.Group();
+        if (presetWalls.length > 0) {
+          // Build polygon from wall chain start points, centered
+          const pts = presetWalls.map((wl) => ({ x: wl.start.x - W / 2, y: wl.start.y - H / 2 }));
+          const shape = new THREE.Shape();
+          pts.forEach((v, i) => { if (i === 0) shape.moveTo(v.x, v.y); else shape.lineTo(v.x, v.y); });
+          shape.closePath();
+          const fillMesh = new THREE.Mesh(
+            new THREE.ShapeGeometry(shape),
+            new THREE.MeshStandardMaterial({ color: 0x4488ff, transparent: true, opacity: 0.12, side: THREE.DoubleSide })
+          );
+          fillMesh.rotation.x = -Math.PI / 2;
+          g.add(fillMesh);
+          // Perimeter outline — trace each wall segment in XZ plane
+          const edgeMat = new THREE.MeshStandardMaterial({ color: 0x4488ff, emissive: new THREE.Color(0x2244ff), emissiveIntensity: 0.6 });
+          for (const wl of presetWalls) {
+            const sx = wl.start.x - W / 2, sz = wl.start.y - H / 2;
+            const ex = wl.end.x   - W / 2, ez = wl.end.y   - H / 2;
+            const segLen = Math.hypot(ex - sx, ez - sz);
+            const ang = Math.atan2(ez - sz, ex - sx);
+            const seg = new THREE.Mesh(new THREE.BoxGeometry(segLen, 4, 4), edgeMat);
+            seg.position.set((sx + ex) / 2, 2, (sz + ez) / 2);
+            seg.rotation.y = -ang;
+            g.add(seg);
+          }
+        }
+        g.visible = false;
         ghostGroup = g; scene.add(ghostGroup);
         updateGridVisibility(); markSceneDirty();
       } else if (activePlacementType === 'room') {
@@ -2649,7 +4049,56 @@
       }
     });
 
+    const unsubWallCutoff = wallCutoffEnabled.subscribe(v => applyWallCutoff(v));
+    const unsubXRefSync = xrefSyncTrigger.subscribe(() => rebuildXRefGroup());
+    const unsubShowAllFloors = showAllFloorsStore.subscribe(v => { showAllFloors = v; rebuildScene(); });
+    const unsubWallTransparent = wallTransparentStore.subscribe(v => { applyWallTransparency(v); });
+    const unsubSceneCmd = sceneCommand.subscribe(cmd => {
+      if (!cmd) return;
+      if (cmd === 'toggleCamera') {
+        if (cameraPlacementMode) { cameraPlacementMode = false; } else { cameraPlacementMode = true; cameraPlaced = false; editMode = true; if (walkthroughMode) exitWalkthroughMode(); furniturePlacementMode = false; }
+      } else if (cmd === 'toggleWalkthrough') {
+        toggleWalkthroughMode();
+      }
+      sceneCommand.set(null);
+    });
+
+    const unsubCameraView = cameraView.subscribe((view) => {
+      if (!view) return;
+      switch (view) {
+        case 'top-down':   viewTopDown();   break;
+        case 'front':      viewFront();     break;
+        case 'side':       viewSide();      break;
+        case 'isometric':  viewIsometric(); break;
+        case 'exploded':   viewExploded();  break;
+        case 'perspective': {
+          const box = new THREE.Box3().setFromObject(wallGroup);
+          const center = box.getCenter(new THREE.Vector3());
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.z, 500);
+          camera.position.set(center.x + maxDim, maxDim * 0.8, center.z + maxDim);
+          controls.target.set(center.x, 0, center.z);
+          controls.update();
+          markSceneDirty();
+          break;
+        }
+      }
+      // Reset after handling so same view can be re-triggered
+      cameraView.set(null);
+    });
+
+    // Capture 3D snapshot for Sheets viewport
+    function onCapture3D(e: CustomEvent<{ sheetId: string; vpId: string }>) {
+      renderer.render(scene, camera);
+      const dataUrl = renderer.domElement.toDataURL('image/png');
+      window.dispatchEvent(new CustomEvent('sheets-3d-captured', {
+        detail: { sheetId: e.detail.sheetId, vpId: e.detail.vpId, dataUrl }
+      }));
+    }
+    window.addEventListener('sheets-capture-3d', onCapture3D as EventListener);
+
     return () => {
+      window.removeEventListener('sheets-capture-3d', onCapture3D as EventListener);
       resizeObs.disconnect();
       unsub();
       unsubRooms();
@@ -2658,12 +4107,21 @@
       unsubHighlight();
       unsubPlacingFurniture();
       unsubPlacingStair();
+      unsubPlacingStairType();
       unsubPlacingColumn();
       unsubPlacingColumnShape();
       unsubPlacingDoorType();
       unsubPlacingWindowType();
       unsubSelectedTool();
+      unsubWallSubType();
+      unsubWallHeight();
       unsubPlacingRoom();
+      unsubCameraView();
+      unsubWallCutoff();
+      unsubXRefSync();
+      unsubShowAllFloors();
+      unsubWallTransparent();
+      unsubSceneCmd();
       cancelAnimationFrame(animId);
       document.removeEventListener('keydown', onKeyDown, false);
       document.removeEventListener('keyup', onKeyUp, false);
@@ -2673,126 +4131,21 @@
 </script>
 
 <div bind:this={container} class="w-full h-full relative">
-  <!-- 3D Toolbar Row -->
-  <div class="absolute top-4 right-4 z-50 flex gap-1.5">
-    <!-- Multi-Floor Stacking Toggle -->
-    <button
-      onclick={() => { showAllFloors = !showAllFloors; rebuildScene(); }}
-      class="p-2 rounded-lg transition-colors {showAllFloors ? 'bg-purple-600 text-white ring-2 ring-purple-300' : 'bg-black/70 text-white hover:bg-black/80'}"
-      title={showAllFloors ? 'Active Floor Only' : 'Show All Floors Stacked'}
-      aria-label={showAllFloors ? 'Active Floor Only' : 'Show All Floors Stacked'}
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="4" y="14" width="16" height="4" rx="1"/>
-        <rect x="4" y="8" width="16" height="4" rx="1" opacity="0.6"/>
-        <rect x="4" y="2" width="16" height="4" rx="1" opacity="0.3"/>
-      </svg>
+  <!-- Screenshot shortcut button (scene-mode buttons are now in TopBar Row 2) -->
+  <div class="absolute top-3 right-3 z-40 flex gap-1">
+    <button onclick={takeScreenshot} class="p-1.5 rounded-lg bg-black/60 text-white/80 hover:bg-black/80 transition-colors" title="Save 3D Screenshot">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
     </button>
+  </div>
 
-    <!-- Top-Down View Button -->
-    <button
-      onclick={viewTopDown}
-      class="p-2 rounded-lg bg-black/70 text-white hover:bg-black/80 transition-colors"
-      title="Top-Down View"
-      aria-label="Top-Down View"
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="10"/>
-        <line x1="12" y1="2" x2="12" y2="6"/>
-        <line x1="12" y1="18" x2="12" y2="22"/>
-        <line x1="2" y1="12" x2="6" y2="12"/>
-        <line x1="18" y1="12" x2="22" y2="12"/>
-      </svg>
-    </button>
-
-    <!-- Wall Transparency Toggle -->
-    <button
-      onclick={toggleWallTransparency}
-      class="p-2 rounded-lg transition-colors {wallsTransparent ? 'bg-blue-600 text-white ring-2 ring-blue-300' : 'bg-black/70 text-white hover:bg-black/80'}"
-      title={wallsTransparent ? 'Show Solid Walls' : 'Make Walls Transparent'}
-      aria-label={wallsTransparent ? 'Show Solid Walls' : 'Make Walls Transparent'}
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="3" y="3" width="18" height="18" rx="2" opacity={wallsTransparent ? 0.3 : 1}/>
-        <line x1="3" y1="12" x2="21" y2="12"/>
-        <line x1="12" y1="3" x2="12" y2="21"/>
-      </svg>
-    </button>
-
-    <!-- Edit Mode Toggle -->
-    <button
-      onclick={() => { editMode = !editMode; if (editMode && walkthroughMode) { exitWalkthroughMode(); } if (!editMode) { selectedElementId.set(null); materialPickerWall = null; materialPickerPos = null; } }}
-      class="p-2 rounded-lg transition-colors {editMode ? 'bg-blue-600 text-white ring-2 ring-blue-300' : 'bg-black/70 text-white hover:bg-black/80'}"
-      title={editMode ? 'Exit Edit Mode' : 'Edit Mode — click to select walls & change materials'}
-      aria-label={editMode ? 'Exit Edit Mode' : 'Edit Mode'}
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-      </svg>
-    </button>
-
-    <!-- Interior Camera Button -->
-    <button
-      onclick={() => {
-        if (cameraPlacementMode) {
-          cameraPlacementMode = false;
-        } else {
-          cameraPlacementMode = true;
-          cameraPlaced = false;
-          editMode = true;
-          if (walkthroughMode) exitWalkthroughMode();
-          furniturePlacementMode = false;
-        }
-      }}
-      class="p-2 rounded-lg transition-colors {cameraPlacementMode ? 'bg-blue-600 text-white ring-2 ring-blue-300' : 'bg-black/70 text-white hover:bg-black/80'}"
-      title={cameraPlacementMode ? 'Cancel camera placement (click floor to place)' : 'Place Interior Camera — click floor to position, click again to aim'}
-      aria-label="Place Interior Camera"
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M23 7l-7 5 7 5V7z"/>
-        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-      </svg>
-    </button>
-
-    <!-- 3D Screenshot Button -->
-    <button
-      onclick={takeScreenshot}
-      class="p-2 rounded-lg bg-black/70 text-white hover:bg-black/80 transition-colors"
-      title="Save 3D Screenshot"
-      aria-label="Save 3D Screenshot"
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-        <circle cx="12" cy="13" r="4"/>
-      </svg>
-    </button>
-
-    <!-- Walkthrough Mode Toggle Button -->
-    <button
-      onclick={toggleWalkthroughMode}
-      class="p-2 rounded-lg bg-black/70 text-white hover:bg-black/80 transition-colors"
-      title={walkthroughMode ? 'Exit Walkthrough Mode' : 'Enter Walkthrough Mode'}
-      aria-label={walkthroughMode ? 'Exit Walkthrough Mode' : 'Enter Walkthrough Mode'}
-  >
-    {#if walkthroughMode}
-      <!-- Exit/Eye closed icon -->
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
-        <line x1="1" y1="1" x2="23" y2="23"/>
-      </svg>
-    {:else}
-      <!-- Walking person icon -->
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="4" r="2"/>
-        <path d="M10 16v6"/>
-        <path d="M14 16v6"/>
-        <path d="M12 6h2l4 4"/>
-        <path d="M10 14l2-2 1 2"/>
-      </svg>
-    {/if}
-    </button>
-  </div><!-- end 3D toolbar row -->
+  {#if dim3DActive && activePlacementType === 'wall' && activeWallSubType !== 'curved'}
+    <DimensionInput
+      x={dim3DScreenX}
+      y={dim3DScreenY}
+      onCommit={onDim3DCommit}
+      onCancel={() => { clearWallDrawingState(); }}
+    />
+  {/if}
 
   {#if cameraPlacementMode && !cameraPlaced}
     <div class="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-black/80 text-white px-4 py-2 rounded-lg text-sm backdrop-blur-sm">
@@ -2801,6 +4154,26 @@
   {:else if cameraPlacementMode && cameraPlaced}
     <div class="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-black/80 text-white px-4 py-2 rounded-lg text-sm backdrop-blur-sm">
       🎯 Click where the camera should look
+    </div>
+  {:else if activePlacementType === 'wall'}
+    <div class="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-black/80 text-white px-4 py-2 rounded-lg text-sm backdrop-blur-sm">
+      {#if activeWallSubType === 'curved'}
+        {curvedWallPhase === 0 ? 'Click to set wall start' : curvedWallPhase === 1 ? 'Click to set wall end' : 'Click to set curve control point'}
+      {:else}
+        {wallDrawStart ? 'Click to place wall end — double-click to finish' : 'Click to start drawing a wall'}
+      {/if}
+      &nbsp;· ESC to cancel
+    </div>
+  {/if}
+
+  <!-- Hover tooltip for doors/windows -->
+  {#if hoverTooltip?.visible}
+    <div
+      class="absolute z-50 bg-gray-900/95 text-white text-xs px-2 py-1.5 rounded shadow-lg pointer-events-none"
+      style="left:{hoverTooltip.x}px; top:{hoverTooltip.y}px; transform:translateX(-50%)"
+    >
+      <div class="font-medium">{hoverTooltip.label}</div>
+      <div class="text-gray-400">{hoverTooltip.dims}</div>
     </div>
   {/if}
 
@@ -3086,7 +4459,7 @@
             rows="3"
             autofocus
             class="w-full resize-none text-sm text-slate-700 border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400 placeholder-slate-300"
-            onkeydown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitComment(); } if (e.key === 'Escape') { commentInputVisible = false; setCollabOutline(null); collabSelectedObjectId = null; commentInputText = ''; } }}
+            onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitComment(); } if (e.key === 'Escape') { commentInputVisible = false; setCollabOutline(null); collabSelectedObjectId = null; commentInputText = ''; } }}
           ></textarea>
           <div class="flex items-center justify-between mt-2">
             <span class="text-[10px] text-slate-400">Ctrl+Enter to submit</span>
@@ -3097,6 +4470,27 @@
             >Post Comment</button>
           </div>
         </div>
+      </div>
+    {/if}
+
+    <!-- Focus mode banner -->
+    {#if focusMode}
+      <div class="absolute top-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-slate-900/90 text-white text-xs px-4 py-2 rounded-full backdrop-blur-sm shadow-lg border border-white/10">
+        <svg class="w-3.5 h-3.5 text-violet-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+        </svg>
+        <span class="text-violet-300 font-medium">Focus:</span>
+        <span class="max-w-[200px] truncate opacity-90">{focusCommentText.length > 40 ? focusCommentText.slice(0, 40) + '…' : focusCommentText}</span>
+        <button
+          onclick={exitFocusMode}
+          class="ml-1 flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/10 hover:bg-white/20 transition-colors text-white text-[10px] font-medium"
+        >
+          <svg width="9" height="9" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+          Exit Focus
+        </button>
       </div>
     {/if}
 
@@ -3122,17 +4516,17 @@
           <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
         </svg>
         {#if activePlacementType === 'furniture' || furniturePlacementMode}
-          🪑 Click floor to place {selectedCatalogId ? (getCatalogItem(selectedCatalogId)?.name ?? 'furniture') : 'furniture'} • ESC to cancel
+          {#if placementPhase === 1}🪑 Move to rotate — click or Enter to confirm • ESC to reposition{:else}🪑 Click floor to place {selectedCatalogId ? (getCatalogItem(selectedCatalogId)?.name ?? 'furniture') : 'furniture'} • ESC to cancel{/if}
         {:else if activePlacementType === 'stair'}
-          🪜 Click floor to place stair • ESC to cancel
+          {#if placementPhase === 1}🪜 Move to rotate stair — click or Enter to confirm • ESC to reposition{:else}🪜 Click floor to place stair • ESC to cancel{/if}
         {:else if activePlacementType === 'column'}
-          🏛️ Click floor to place {activeColumnShape} column • ESC to cancel
+          {#if placementPhase === 1}🏛️ Move to rotate {activeColumnShape} column — click or Enter to confirm • ESC to reposition{:else}🏛️ Click floor to place {activeColumnShape} column • ESC to cancel{/if}
         {:else if activePlacementType === 'door'}
           🚪 Hover over a wall and click to place door • ESC to cancel
         {:else if activePlacementType === 'window'}
           🪟 Hover over a wall and click to place window • ESC to cancel
         {:else if activePlacementType === 'room'}
-          🏠 Click floor to place room • ESC to cancel
+          {#if placementPhase === 1}🏠 Move to rotate room — click or Enter to confirm • ESC to reposition{:else}🏠 Click floor to place room • ESC to cancel{/if}
         {:else}
           🪣 Click walls to paint • R to rotate selected • Del to delete • ESC to exit
         {/if}
