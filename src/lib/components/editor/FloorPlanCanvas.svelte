@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { activeFloor, selectedTool, selectedElementId, selectedElementIds, selectedRoomId, addWall, addDoor, addWindow, updateWall, moveWallEndpoint, updateDoor, updateWindow, addFurniture, moveFurniture, commitFurnitureMove, rotateFurniture, setFurnitureRotation, scaleFurniture, removeElement, placingFurnitureId, placingRotation, placingDoorType, placingWindowType, detectedRoomsStore, duplicateDoor, duplicateWindow, duplicateFurniture, duplicateWall, moveWallParallel, splitWall, snapEnabled, placingStair, addStair, moveStair, updateStair, placingColumn, placingColumnShape, addColumn, moveColumn, updateColumn, calibrationMode, calibrationPoints, updateBackgroundImage, setBackgroundImage, canvasZoom, canvasCamX, canvasCamY, panMode, showFurnitureStore, addGuide, moveGuide, removeGuide, beginUndoGroup, endUndoGroup, layerVisibility, updateRoom, addMeasurement, removeMeasurement, addAnnotation, removeAnnotation, updateAnnotation, addTextAnnotation, removeTextAnnotation, updateTextAnnotation, moveTextAnnotation, toggleFurnitureLock, createGroup, ungroupElements, findGroupForElement, addDrivenAnnotation, removeDrivenAnnotation, resolveDrivenDimension, syncDrivenAnnotationsForWall, placingDetailId, addWallDetailAttachment, removeWallDetailAttachment,
-  placingEntourageDefId, addEntourageItem, updateEntourageItem, removeEntourageItem } from '$lib/stores/project';
+  placingEntourageDefId, addEntourageItem, updateEntourageItem, removeEntourageItem, currentProject } from '$lib/stores/project';
   import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, GuideLine, Measurement, Annotation, TextAnnotation, DrivenAnnotation } from '$lib/models/types';
   import type { Floor, Room } from '$lib/models/types';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
@@ -23,6 +23,9 @@
   import type { XRefDxf } from '$lib/models/types';
   import { drawWall as _drawWall, drawDoorOnWall as _drawDoorOnWall, drawWindowOnWall as _drawWindowOnWall, drawDoorDistanceDimensions as _drawDoorDistanceDimensions, drawWindowDistanceDimensions as _drawWindowDistanceDimensions, drawFurnitureItem, drawStair as _drawStair, drawColumn as _drawColumn, drawGuides as _drawGuides, drawPersistedMeasurements as _drawPersistedMeasurements, drawTextAnnotations as _drawTextAnnotations, drawAnnotation as _drawAnnotation, drawAnnotations as _drawAnnotations, drawDrivenAnnotation as _drawDrivenAnnotation, drawDrivenAnnotations as _drawDrivenAnnotations, drawDetailCallouts as _drawDetailCallouts, drawRooms as _drawRooms, drawWallJoints as _drawWallJoints, drawSnapPoints as _drawSnapPoints, drawMinimap as _drawMinimap, drawSnapIndicator as _drawSnapIndicator, drawDragTooltip as _drawDragTooltip, drawApproachingCandidate as _drawApproachingCandidate, drawAxisRail as _drawAxisRail, drawGripDots as _drawGripDots } from '$lib/utils/canvasRenderer';
   import { detailCatalog } from '$lib/utils/detailCatalog';
+  import { drawEntourageItems as _drawEntourageItems, drawEntourageGhost as _drawEntourageGhost } from '$lib/utils/canvasRenderer';
+  import { entourageCatalog } from '$lib/utils/entourageCatalog';
+  import type { EntourageDef, CustomEntourageDef, EntourageItem } from '$lib/models/types';
   import { pointInPolygon, positionOnWall, findWallAt as _findWallAt, findHandleAt as _findHandleAt, findFurnitureAt as _findFurnitureAt, findColumnAt as _findColumnAt, findStairAt as _findStairAt, findDoorAt as _findDoorAt, findWindowAt as _findWindowAt, findRoomAt as _findRoomAt, hitTestMeasurement as _hitTestMeasurement, hitTestAnnotation as _hitTestAnnotation, hitTestTextAnnotation as _hitTestTextAnnotation } from '$lib/utils/hitTesting';
   import DimensionInput from '$lib/components/ui/DimensionInput.svelte';
 
@@ -123,6 +126,41 @@
   let currentPlacingDetailId: string | null = $state(null);
   placingDetailId.subscribe(id => { currentPlacingDetailId = id; });
   let selectedCalloutId: string | null = $state(null);
+
+  // Entourage placement + interaction state
+  let currentPlacingEntourageDefId: string | null = $state(null);
+  placingEntourageDefId.subscribe(id => { currentPlacingEntourageDefId = id; });
+  let selectedEntourageItemId: string | null = $state(null);
+  let ghostEntourageRotation: number = $state(0);
+  // Image cache for custom PNG entourage items
+  const entourageImageCache = new Map<string, HTMLImageElement>();
+  // Resize drag state for selected entourage item
+  let draggingEntourageResize: { itemId: string; startMouseX: number; startMouseY: number; origWidthCm: number } | null = $state(null);
+  // Drag-to-move state for selected entourage item
+  let draggingEntourageMove: { itemId: string; offsetX: number; offsetY: number } | null = $state(null);
+
+  // Subscribe to currentProject for customEntourage access
+  let localCurrentProject: import('$lib/models/types').Project | null = $state(null);
+  currentProject.subscribe(p => { localCurrentProject = p; markDirty(); });
+
+  // All defs: built-in catalog + project's custom uploads
+  const allEntourageDefs = $derived((): (EntourageDef | CustomEntourageDef)[] => {
+    const custom = localCurrentProject?.customEntourage ?? [];
+    return [...entourageCatalog, ...custom];
+  });
+
+  // Preload custom PNG images when project changes
+  $effect(() => {
+    const custom = localCurrentProject?.customEntourage ?? [];
+    for (const def of custom) {
+      if (!entourageImageCache.has(def.id)) {
+        const img = new Image();
+        img.onload = () => markDirty();
+        img.src = def.imageDataUrl;
+        entourageImageCache.set(def.id, img);
+      }
+    }
+  });
 
   // Text annotation tool
   let textAnnotationMode = $state(false);
@@ -1208,7 +1246,8 @@
         draggingColumnId || draggingWallEndpoint || draggingWallParallel || draggingCurveHandle ||
         draggingHandle || draggingMultiSelect || draggingRoomId || draggingRoomLabelId ||
         draggingTextAnnotationId || draggingGuideId || measuring || annotating ||
-        currentPlacingId || isPlacingStair || isPlacingColumn || marqueeStart || isPanning) {
+        currentPlacingId || isPlacingStair || isPlacingColumn || marqueeStart || isPanning ||
+        currentPlacingEntourageDefId || draggingEntourageResize || draggingEntourageMove) {
       canvasDirty = true;
     }
 
@@ -1842,6 +1881,18 @@
     // Annotations
     if (layerVis.annotations && floor) drawAnnotations(floor);
     if (layerVis.annotations && floor) drawDrivenAnnotations(floor);
+    // Entourage layer (between furniture and detail callouts)
+    if (floor) {
+      _drawEntourageItems(getCS(), floor, selectedEntourageItemId, allEntourageDefs(), entourageImageCache);
+    }
+    // Entourage placement ghost
+    if (currentPlacingEntourageDefId && mousePos) {
+      const def = allEntourageDefs().find(d => d.id === currentPlacingEntourageDefId);
+      if (def) {
+        const snapped = { x: snap(mousePos.x), y: snap(mousePos.y) };
+        _drawEntourageGhost(getCS(), def, snapped.x, snapped.y, ghostEntourageRotation, entourageImageCache);
+      }
+    }
     if (floor) drawDetailCallouts(floor);
     // Annotation preview
     if (annotating && annotationStart) drawAnnotationPreview();
@@ -2197,6 +2248,68 @@
       selectedTextAnnotationId = id;
       selectedElementId.set(id);
       return;
+    }
+
+    // Entourage stamp placement
+    if (currentPlacingEntourageDefId && !e.altKey) {
+      const def = allEntourageDefs().find(d => d.id === currentPlacingEntourageDefId);
+      if (def) {
+        const snapped = { x: snap(wp.x), y: snap(wp.y) };
+        addEntourageItem({
+          id: Math.random().toString(36).slice(2, 10),
+          defId: def.id,
+          source: def.source,
+          viewType: def.viewType,
+          x: snapped.x,
+          y: snapped.y,
+          widthCm: def.defaultWidthCm,
+          rotation: ghostEntourageRotation,
+          opacity: 0.85,
+          locked: false,
+        });
+        markDirty();
+        return; // stamp placed, stay in stamp mode
+      }
+    }
+
+    // Entourage item selection (in select mode)
+    if (currentTool === 'select' && !currentPlacingEntourageDefId) {
+      const floor = currentFloor;
+      if (floor?.entourageItems) {
+        const defs = allEntourageDefs();
+        for (let i = floor.entourageItems.length - 1; i >= 0; i--) {
+          const item = floor.entourageItems[i];
+          if (item.viewType !== 'plan') continue;
+          if (item.locked) continue;
+          const def = defs.find(d => d.id === item.defId);
+          if (!def) continue;
+          const [,,nomW, nomH] = def.viewBox.split(' ').map(Number);
+          const hw = item.widthCm / 2;
+          const hh = item.widthCm * (nomH / nomW) / 2;
+          // Axis-aligned hit test (rotation not factored — acceptable for MVP)
+          if (Math.abs(wp.x - item.x) <= hw + 5 && Math.abs(wp.y - item.y) <= hh + 5) {
+            // Check for resize handle hit (bottom-right corner in screen space)
+            const sp = { x: (item.x - camX) * zoom + width / 2, y: (item.y - camY) * zoom + height / 2 };
+            const rhx = sp.x + (hw + 4) * zoom;  // approx screen x of handle
+            const rhy = sp.y + (hh + 4) * zoom;
+            const ex = e.clientX - rect.left;
+            const ey = e.clientY - rect.top;
+            if (Math.hypot(ex - rhx, ey - rhy) < 10) {
+              draggingEntourageResize = { itemId: item.id, startMouseX: ex, startMouseY: ey, origWidthCm: item.widthCm };
+            } else {
+              draggingEntourageMove = { itemId: item.id, offsetX: wp.x - item.x, offsetY: wp.y - item.y };
+            }
+            selectedEntourageItemId = item.id;
+            markDirty();
+            return;
+          }
+        }
+      }
+      // Click on empty canvas clears entourage selection
+      if (selectedEntourageItemId) {
+        selectedEntourageItemId = null;
+        markDirty();
+      }
     }
 
     // Detail callout placement: click on or near a wall to attach
@@ -3086,6 +3199,17 @@
         }
       }
     }
+    if (draggingEntourageMove) {
+      const snapped = { x: snap(mousePos.x - draggingEntourageMove.offsetX), y: snap(mousePos.y - draggingEntourageMove.offsetY) };
+      updateEntourageItem(draggingEntourageMove.itemId, { x: snapped.x, y: snapped.y });
+      markDirty();
+    }
+    if (draggingEntourageResize) {
+      const dx = cursorScreenX - draggingEntourageResize.startMouseX;
+      const newWidthCm = Math.max(10, draggingEntourageResize.origWidthCm + dx / zoom);
+      updateEntourageItem(draggingEntourageResize.itemId, { widthCm: newWidthCm });
+      markDirty();
+    }
     // Door/window placement preview
     if ((currentTool === 'door' || currentTool === 'window') && currentFloor) {
       const wall = findWallAt(mousePos);
@@ -3228,6 +3352,8 @@
       marqueeEnd = null;
     }
 
+    if (draggingEntourageMove) { draggingEntourageMove = null; }
+    if (draggingEntourageResize) { draggingEntourageResize = null; }
     if (draggingFurnitureId) commitFurnitureMove();
     if (draggingHandle) commitFurnitureMove();
     if (draggingWallEndpoint) commitFurnitureMove();
@@ -3376,6 +3502,29 @@
       removeWallDetailAttachment(selectedCalloutId);
       selectedCalloutId = null;
       e.preventDefault();
+      return;
+    }
+
+    // Entourage R key rotates ghost 45°
+    if (e.key === 'r' || e.key === 'R') {
+      if (currentPlacingEntourageDefId) {
+        ghostEntourageRotation = (ghostEntourageRotation + 45) % 360;
+        markDirty();
+        return;
+      }
+    }
+    // ESC exits entourage stamp mode
+    if (e.key === 'Escape' && currentPlacingEntourageDefId) {
+      placingEntourageDefId.set(null);
+      ghostEntourageRotation = 0;
+      markDirty();
+      return;
+    }
+    // Delete removes selected entourage item
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedEntourageItemId) {
+      removeEntourageItem(selectedEntourageItemId);
+      selectedEntourageItemId = null;
+      markDirty();
       return;
     }
 
@@ -3689,6 +3838,31 @@
     const rect = canvas.getBoundingClientRect();
     const wp = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
 
+    // Right-click on entourage item
+    if (currentFloor?.entourageItems && currentTool === 'select') {
+      const defs = allEntourageDefs();
+      for (let i = currentFloor.entourageItems.length - 1; i >= 0; i--) {
+        const item = currentFloor.entourageItems[i];
+        if (item.viewType !== 'plan') continue;
+        const def = defs.find(d => d.id === item.defId);
+        if (!def) continue;
+        const [,,nomW, nomH] = def.viewBox.split(' ').map(Number);
+        const hw = item.widthCm / 2;
+        const hh = item.widthCm * (nomH / nomW) / 2;
+        if (Math.abs(wp.x - item.x) <= hw + 5 && Math.abs(wp.y - item.y) <= hh + 5) {
+          e.preventDefault();
+          selectedEntourageItemId = item.id;
+          ctxMenuTargetType = 'canvas'; // reuse canvas menu type to show Delete
+          ctxMenuTargetId = item.id;
+          ctxMenuVisible = true;
+          ctxMenuX = e.clientX;
+          ctxMenuY = e.clientY;
+          markDirty();
+          return;
+        }
+      }
+    }
+
     // Hit-test in priority order: furniture > door > window > wall > room > canvas
     const fi = findFurnitureAt(wp);
     if (fi) {
@@ -3876,6 +4050,13 @@
 
       // Shared actions
       case 'delete':
+        // Check if the target is an entourage item
+        if (id && currentFloor?.entourageItems?.some(ei => ei.id === id)) {
+          removeEntourageItem(id);
+          selectedEntourageItemId = null;
+          markDirty();
+          break;
+        }
         if (id) { removeElement(id); selectedElementId.set(null); }
         break;
       case 'properties':
