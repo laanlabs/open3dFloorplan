@@ -9,6 +9,7 @@
   } from '$lib/stores/collaboration';
   import { currentProject } from '$lib/stores/project';
   import type { Comment3D, ReviewSession, SessionVisibility } from '$lib/stores/collaboration';
+  import { timeElapsed } from '$lib/utils/timeElapsed';
 
   // ─── Formatting ────────────────────────────────────────────────────────────
 
@@ -36,9 +37,11 @@
     return colors[Math.abs(hash) % colors.length];
   }
 
-  // ─── Switchbar + view filter ───────────────────────────────────────────────
+  // ─── Tab + view filter ────────────────────────────────────────────────────
 
-  let viewMode = $state<'internal' | 'client'>('internal');
+  let activeTab = $state<'threads' | 'log' | 'client'>('threads');
+  // viewMode derived from activeTab so existing logic still works
+  let viewMode = $derived<'internal' | 'client'>(activeTab === 'client' ? 'client' : 'internal');
   let searchQuery = $state('');
   let filterStatus = $state<'all' | 'comment' | 'approval_pending' | 'approved' | 'changes_requested' | 'cancelled'>('all');
   let threadPendingMode = $state(false);
@@ -264,16 +267,23 @@
 
 <div class="w-80 shrink-0 bg-white border-l border-gray-200 flex flex-col h-full select-none">
 
-  <!-- ── Switchbar ──────────────────────────────────────────────────────────── -->
+  <!-- ── Tab bar ────────────────────────────────────────────────────────────── -->
   <div class="flex border-b border-gray-200 shrink-0">
-    <button
-      class="flex-1 py-2 text-xs font-semibold transition-colors {viewMode === 'internal' ? 'border-b-2 border-violet-600 text-violet-700 bg-violet-50' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'}"
-      onclick={() => { viewMode = 'internal'; }}
-    >🔒 Internal Review</button>
-    <button
-      class="flex-1 py-2 text-xs font-semibold transition-colors {viewMode === 'client' ? 'border-b-2 border-blue-600 text-blue-700 bg-blue-50' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'}"
-      onclick={() => { viewMode = 'client'; }}
-    >👥 Client View</button>
+    {#each ([
+      { id: 'threads', label: '🧵 Threads' },
+      { id: 'log',     label: '📋 Log' },
+      { id: 'client',  label: '👥 Client View' },
+    ] as const) as tab}
+      {#if !(tab.id === 'client' && $activeUser.projectRole === 'Client')}
+        <button
+          class="flex-1 py-2 text-xs font-semibold transition-colors
+            {activeTab === tab.id
+              ? 'border-b-2 border-violet-600 text-violet-700 bg-violet-50'
+              : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'}"
+          onclick={() => { activeTab = tab.id; }}
+        >{tab.label}</button>
+      {/if}
+    {/each}
   </div>
 
   <!-- ── Search + Thread row ───────────────────────────────────────────────── -->
@@ -495,7 +505,13 @@
     </span>
   </div>
 
+  <!-- ── Log placeholder ──────────────────────────────────────────────────── -->
+  {#if activeTab === 'log'}
+    <div class="flex-1 flex items-center justify-center text-xs text-slate-400">Log coming soon…</div>
+  {/if}
+
   <!-- ── Comment timeline ──────────────────────────────────────────────────── -->
+  {#if activeTab === 'threads' || activeTab === 'client'}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="flex-1 overflow-y-auto" onclick={() => { if (sessionDropdownOpen) sessionDropdownOpen = false; }}>
 
@@ -586,6 +602,15 @@
                             >👁</button>
                           {/if}
                           <span class="text-[10px] text-slate-400">{formatFull(comment.timestamp)}</span>
+                          {#if comment.status === 'comment' || comment.status === 'approval_pending'}
+                            {@const elapsed = timeElapsed(comment.timestamp)}
+                            <span class="text-[10px] font-medium ml-1
+                              {elapsed.urgency === 'high'   ? 'text-red-500'    :
+                               elapsed.urgency === 'medium' ? 'text-amber-500'  :
+                                                              'text-gray-400'}">
+                              · {elapsed.label}
+                            </span>
+                          {/if}
                         </div>
                       </div>
 
@@ -889,6 +914,7 @@
       </div>
     {/if}
   </div>
+  {/if}
 
   <!-- Footer hint -->
   <div class="px-4 py-2.5 border-t border-gray-100 bg-slate-50 shrink-0">
