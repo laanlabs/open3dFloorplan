@@ -70,9 +70,11 @@
   // Top-level non-cancelled comments filtered by viewMode, status, and spatial search
   let filteredComments = $derived(
     sessionComments
-      .filter(c => !c.parentId && c.status !== 'cancelled')
+      .filter(c => !c.parentId)
+      .filter(c => filterStatus === 'cancelled'
+        ? c.status === 'cancelled'
+        : c.status !== 'cancelled' && (filterStatus === 'all' ? true : c.status === filterStatus))
       .filter(c => viewMode === 'client' ? c.clientVisible : true)
-      .filter(c => filterStatus === 'all' ? true : c.status === filterStatus)
       .filter(c => {
         if (!searchQuery.trim()) return true;
         const q = searchQuery.toLowerCase();
@@ -878,7 +880,7 @@
     {/if}
 
     <!-- ── Cancelled accordion ──────────────────────────────────────────────── -->
-    {#if cancelledComments.length > 0}
+    {#if cancelledComments.length > 0 && filterStatus !== 'cancelled'}
       <div class="border-t border-gray-100 mt-1">
         <button
           class="w-full flex items-center justify-between px-4 py-2.5 text-[11px] text-slate-400 hover:bg-gray-50 transition-colors"
