@@ -10,6 +10,7 @@
   import { currentProject } from '$lib/stores/project';
   import type { Comment3D, ReviewSession, SessionVisibility } from '$lib/stores/collaboration';
   import { timeElapsed } from '$lib/utils/timeElapsed';
+  import LogTable from '$lib/components/collaboration/LogTable.svelte';
 
   // ─── Formatting ────────────────────────────────────────────────────────────
 
@@ -505,9 +506,20 @@
     </span>
   </div>
 
-  <!-- ── Log placeholder ──────────────────────────────────────────────────── -->
+  <!-- ── Log tab ──────────────────────────────────────────────────────────── -->
   {#if activeTab === 'log'}
-    <div class="flex-1 flex items-center justify-center text-xs text-slate-400">Log coming soon…</div>
+    <LogTable
+      comments={sessionComments}
+      users={$collabUsers}
+      sessionVisibility={$activeSession?.visibility ?? 'internal'}
+      {filterStatus}
+      onSelectComment={(c) => {
+        selectedCommentId = c.id;
+        highlightedCommentObjectId.set(c.objectId);
+        focusedCommentId.set(c.id);
+        activeTab = 'threads';
+      }}
+    />
   {/if}
 
   <!-- ── Comment timeline ──────────────────────────────────────────────────── -->
