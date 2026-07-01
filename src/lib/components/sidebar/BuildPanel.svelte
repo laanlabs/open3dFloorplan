@@ -18,7 +18,6 @@
   import { placingEntourageDefId, addCustomEntourage, removeCustomEntourage } from '$lib/stores/project';
   import { entourageCatalog, entourageCategories } from '$lib/utils/entourageCatalog';
   import type { EntourageDef, CustomEntourageDef, EntourageViewType } from '$lib/models/types';
-  // @ts-ignore — EntourageUploadDialog is added in Task 7
   import EntourageUploadDialog from '$lib/components/editor/EntourageUploadDialog.svelte';
 
   // AreaSummaryPanel moved to top bar dialog
@@ -1031,8 +1030,9 @@
             onclick={() => entourageViewFilter = 'plan'}
           >Plan</button>
           <button
-            class="flex-1 py-1 text-xs rounded {entourageViewFilter === 'elevation' ? 'bg-blue-100 text-blue-700 font-medium' : 'bg-slate-100 text-slate-500'}"
-            onclick={() => entourageViewFilter = 'elevation'}
+            disabled
+            class="flex-1 py-1 text-xs rounded bg-slate-100 text-slate-500 opacity-40 cursor-not-allowed"
+            title="Elevation view — available when elevation canvas ships"
           >Elevation</button>
         </div>
 

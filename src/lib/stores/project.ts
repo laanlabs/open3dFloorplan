@@ -921,6 +921,22 @@ export function updateEntourageItem(
   }, 'Updated entourage');
 }
 
+/** No-snapshot path for drag updates — call commitEntourageMove() on mouseup */
+export function dragUpdateEntourageItem(itemId: string, patch: Partial<import('$lib/models/types').EntourageItem>): void {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find(f => f.id === p.activeFloorId);
+  if (!floor || !floor.entourageItems) return;
+  const idx = floor.entourageItems.findIndex(i => i.id === itemId);
+  if (idx === -1) return;
+  floor.entourageItems[idx] = { ...floor.entourageItems[idx], ...patch };
+  currentProject.set({ ...p });
+}
+
+export function commitEntourageMove(): void {
+  snapshot('Moved entourage');
+}
+
 export function removeEntourageItem(itemId: string): void {
   mutate((f) => {
     if (!f.entourageItems) return;

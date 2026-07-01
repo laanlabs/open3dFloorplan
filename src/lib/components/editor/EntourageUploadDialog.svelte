@@ -14,6 +14,7 @@
   let naturalWidth = $state(0);
   let naturalHeight = $state(0);
   let error = $state('');
+  let imageDimensionsReady = $state(false);
 
   function onFileChange(e: Event) {
     const input = e.target as HTMLInputElement;
@@ -28,13 +29,15 @@
       return;
     }
     error = '';
+    imageDimensionsReady = false;
     const reader = new FileReader();
     reader.onload = () => {
       imageDataUrl = reader.result as string;
       if (!name) name = file.name.replace(/\.[^.]+$/, '');
       // Detect natural dimensions
       const img = new Image();
-      img.onload = () => { naturalWidth = img.naturalWidth; naturalHeight = img.naturalHeight; };
+      img.onload = () => { naturalWidth = img.naturalWidth; naturalHeight = img.naturalHeight; imageDimensionsReady = true; };
+      img.onerror = () => { imageDimensionsReady = false; error = 'Failed to load image'; };
       img.src = imageDataUrl;
     };
     reader.readAsDataURL(file);
@@ -147,7 +150,8 @@
         onclick={onClose}
       >Cancel</button>
       <button
-        class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+        class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        disabled={!imageDimensionsReady || !name.trim() || defaultWidthCm <= 0}
         onclick={save}
       >Save to library</button>
     </div>

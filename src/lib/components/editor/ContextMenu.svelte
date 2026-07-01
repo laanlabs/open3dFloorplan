@@ -7,23 +7,24 @@
     updateWall, updateRoom, removeWall,
     beginUndoGroup, endUndoGroup, updateFurniture
   } from '$lib/stores/project';
-  import type { Wall, Door, Window as Win, FurnitureItem, Room } from '$lib/models/types';
+  import type { Wall, Door, Window as Win, FurnitureItem, Room, EntourageItem } from '$lib/models/types';
 
   interface Props {
     x: number;
     y: number;
     visible: boolean;
-    targetType: 'furniture' | 'wall' | 'door' | 'window' | 'room' | 'canvas' | null;
+    targetType: 'furniture' | 'wall' | 'door' | 'window' | 'room' | 'canvas' | 'entourage' | null;
     targetId: string | null;
     targetWall?: Wall | null;
     targetFurniture?: FurnitureItem | null;
     targetRoom?: Room | null;
+    targetEntourage?: EntourageItem | null;
     clipboard?: any;
     onclose: () => void;
     onaction: (action: string, data?: any) => void;
   }
 
-  let { x, y, visible, targetType, targetId, targetWall, targetFurniture, targetRoom, clipboard, onclose, onaction }: Props = $props();
+  let { x, y, visible, targetType, targetId, targetWall, targetFurniture, targetRoom, targetEntourage, clipboard, onclose, onaction }: Props = $props();
 
   let menuEl: HTMLDivElement;
 
@@ -141,6 +142,15 @@
       <div class="ctx-sep"></div>
       <button class="ctx-item ctx-danger" role="menuitem" onclick={() => clickItem('delete-room')}>
         <span class="ctx-icon">🗑️</span> Delete Room
+      </button>
+
+    {:else if targetType === 'entourage'}
+      <button class="ctx-item ctx-danger" role="menuitem" onclick={() => clickItem('delete-entourage')}>
+        <span class="ctx-icon">🗑️</span> Delete
+      </button>
+      <div class="ctx-sep"></div>
+      <button class="ctx-item" role="menuitem" onclick={() => clickItem('lock-entourage')}>
+        <span class="ctx-icon">{targetEntourage?.locked ? '🔓' : '🔒'}</span> {targetEntourage?.locked ? 'Unlock' : 'Lock'}
       </button>
 
     {:else if targetType === 'canvas'}

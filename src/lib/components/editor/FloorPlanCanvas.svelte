@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { activeFloor, selectedTool, selectedElementId, selectedElementIds, selectedRoomId, addWall, addDoor, addWindow, updateWall, moveWallEndpoint, updateDoor, updateWindow, addFurniture, moveFurniture, commitFurnitureMove, rotateFurniture, setFurnitureRotation, scaleFurniture, removeElement, placingFurnitureId, placingRotation, placingDoorType, placingWindowType, detectedRoomsStore, duplicateDoor, duplicateWindow, duplicateFurniture, duplicateWall, moveWallParallel, splitWall, snapEnabled, placingStair, addStair, moveStair, updateStair, placingColumn, placingColumnShape, addColumn, moveColumn, updateColumn, calibrationMode, calibrationPoints, updateBackgroundImage, setBackgroundImage, canvasZoom, canvasCamX, canvasCamY, panMode, showFurnitureStore, addGuide, moveGuide, removeGuide, beginUndoGroup, endUndoGroup, layerVisibility, updateRoom, addMeasurement, removeMeasurement, addAnnotation, removeAnnotation, updateAnnotation, addTextAnnotation, removeTextAnnotation, updateTextAnnotation, moveTextAnnotation, toggleFurnitureLock, createGroup, ungroupElements, findGroupForElement, addDrivenAnnotation, removeDrivenAnnotation, resolveDrivenDimension, syncDrivenAnnotationsForWall, placingDetailId, addWallDetailAttachment, removeWallDetailAttachment,
-  placingEntourageDefId, addEntourageItem, updateEntourageItem, removeEntourageItem, currentProject } from '$lib/stores/project';
+  placingEntourageDefId, addEntourageItem, updateEntourageItem, dragUpdateEntourageItem, commitEntourageMove, removeEntourageItem, currentProject } from '$lib/stores/project';
   import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, GuideLine, Measurement, Annotation, TextAnnotation, DrivenAnnotation } from '$lib/models/types';
   import type { Floor, Room } from '$lib/models/types';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
@@ -141,6 +141,7 @@
 
   // Subscribe to currentProject for customEntourage access
   let localCurrentProject: import('$lib/models/types').Project | null = $state(null);
+  let lastProjectId = $state<string | null>(null);
   currentProject.subscribe(p => { localCurrentProject = p; markDirty(); });
 
   // All defs: built-in catalog + project's custom uploads
@@ -149,8 +150,12 @@
     return [...entourageCatalog, ...custom];
   });
 
-  // Preload custom PNG images when project changes
+  // Preload custom PNG images when project changes; clear cache on project switch
   $effect(() => {
+    if (localCurrentProject?.id !== lastProjectId) {
+      entourageImageCache.clear();
+      lastProjectId = localCurrentProject?.id ?? null;
+    }
     const custom = localCurrentProject?.customEntourage ?? [];
     for (const def of custom) {
       if (!entourageImageCache.has(def.id)) {
@@ -282,11 +287,12 @@
   let ctxMenuVisible = $state(false);
   let ctxMenuX = $state(0);
   let ctxMenuY = $state(0);
-  let ctxMenuTargetType: 'furniture' | 'wall' | 'door' | 'window' | 'room' | 'canvas' | null = $state(null);
+  let ctxMenuTargetType: 'furniture' | 'wall' | 'door' | 'window' | 'room' | 'canvas' | 'entourage' | null = $state(null);
   let ctxMenuTargetId: string | null = $state(null);
   let ctxMenuWall: Wall | null = $state(null);
   let ctxMenuFurniture: FurnitureItem | null = $state(null);
   let ctxMenuRoom: Room | null = $state(null);
+  let ctxMenuEntourageItem: import('$lib/models/types').EntourageItem | null = $state(null);
 
   /**
    * Compute bounding box of all multi-selected elements.
@@ -3201,13 +3207,13 @@
     }
     if (draggingEntourageMove) {
       const snapped = { x: snap(mousePos.x - draggingEntourageMove.offsetX), y: snap(mousePos.y - draggingEntourageMove.offsetY) };
-      updateEntourageItem(draggingEntourageMove.itemId, { x: snapped.x, y: snapped.y });
+      dragUpdateEntourageItem(draggingEntourageMove.itemId, { x: snapped.x, y: snapped.y });
       markDirty();
     }
     if (draggingEntourageResize) {
       const dx = cursorScreenX - draggingEntourageResize.startMouseX;
       const newWidthCm = Math.max(10, draggingEntourageResize.origWidthCm + dx / zoom);
-      updateEntourageItem(draggingEntourageResize.itemId, { widthCm: newWidthCm });
+      dragUpdateEntourageItem(draggingEntourageResize.itemId, { widthCm: newWidthCm });
       markDirty();
     }
     // Door/window placement preview
@@ -3352,6 +3358,7 @@
       marqueeEnd = null;
     }
 
+    if (draggingEntourageMove || draggingEntourageResize) { commitEntourageMove(); }
     if (draggingEntourageMove) { draggingEntourageMove = null; }
     if (draggingEntourageResize) { draggingEntourageResize = null; }
     if (draggingFurnitureId) commitFurnitureMove();
@@ -3852,8 +3859,9 @@
         if (Math.abs(wp.x - item.x) <= hw + 5 && Math.abs(wp.y - item.y) <= hh + 5) {
           e.preventDefault();
           selectedEntourageItemId = item.id;
-          ctxMenuTargetType = 'canvas'; // reuse canvas menu type to show Delete
+          ctxMenuTargetType = 'entourage';
           ctxMenuTargetId = item.id;
+          ctxMenuEntourageItem = item;
           ctxMenuVisible = true;
           ctxMenuX = e.clientX;
           ctxMenuY = e.clientY;
@@ -4045,6 +4053,17 @@
         if (currentFloor) {
           const idsToUngroup = currentSelectedIds.size > 0 ? [...currentSelectedIds] : (id ? [id] : []);
           if (idsToUngroup.length > 0) ungroupElements(idsToUngroup);
+        }
+        break;
+
+      // Entourage actions
+      case 'delete-entourage':
+        if (id) { removeEntourageItem(id); selectedEntourageItemId = null; markDirty(); }
+        break;
+      case 'lock-entourage':
+        if (id && ctxMenuEntourageItem) {
+          updateEntourageItem(id, { locked: !ctxMenuEntourageItem.locked });
+          markDirty();
         }
         break;
 
@@ -4565,6 +4584,7 @@
     targetWall={ctxMenuWall}
     targetFurniture={ctxMenuFurniture}
     targetRoom={ctxMenuRoom}
+    targetEntourage={ctxMenuEntourageItem}
     clipboard={clipboard}
     onclose={() => { ctxMenuVisible = false; }}
     onaction={handleContextMenuAction}
