@@ -4094,7 +4094,7 @@
     const floor = currentFloor;
     if (!floor) { addWall(a, b); wallStart = nextStart; markDirty(); return; }
 
-    const newWall: Wall = { id: '__preview__', start: a, end: b, thickness: 10, height: 250, materialId: undefined, interiorMaterialId: undefined, exteriorMaterialId: undefined };
+    const newWall: Wall = { id: '__preview__', start: a, end: b, thickness: 10, height: 250, color: '#999' };
     const overlaps = floor.walls.some(w => wallSegmentsOverlap(newWall, w));
 
     if (!overlaps || $autoMergeWalls) {

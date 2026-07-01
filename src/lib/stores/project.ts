@@ -30,7 +30,7 @@ export const activeFloor = derived(currentProject, ($p) => {
   return $p.floors.find((f) => f.id === $p.activeFloorId) ?? $p.floors[0] ?? null;
 });
 
-export type Tool = 'select' | 'wall' | 'door' | 'window' | 'furniture' | 'text';
+export type Tool = 'select' | 'wall' | 'door' | 'window' | 'furniture' | 'text' | 'annotate' | 'measure';
 export const selectedTool = writable<Tool>('select');
 export const snapEnabled = writable<boolean>(true);
 export const autoMergeWalls = writable<boolean>(false);

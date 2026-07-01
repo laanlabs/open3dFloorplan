@@ -38,7 +38,7 @@
   // ─── Derived groups ──────────────────────────────────────────────────────────
 
   // Include cancelled in Log (unlike Threads which hides them by default)
-  let allTopLevel = $derived(comments.filter(c => !c.parentId));
+  let allTopLevel = $derived(comments.filter((c: Comment3D) => !c.parentId));
 
   let groups = $derived(groupByObject(allTopLevel)); // group from ALL (for history context)
 
