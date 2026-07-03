@@ -86,6 +86,8 @@ export interface Stair {
   stairType: StairType; // default 'straight'
 }
 
+export type ColumnFace = 'north' | 'south' | 'east' | 'west';
+
 export interface Column {
   id: string;
   position: Point;
@@ -94,6 +96,9 @@ export interface Column {
   diameter: number;  // cm (for round) or side length (for square)
   height: number;    // cm
   color: string;
+  /** Per-face paint overrides — square columns only; round columns have no discrete planes */
+  faceColors?: Partial<Record<ColumnFace, string>>;
+  faceTextures?: Partial<Record<ColumnFace, string>>;
 }
 
 export interface Measurement {
