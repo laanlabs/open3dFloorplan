@@ -1084,15 +1084,14 @@
 
         const hits = raycaster.intersectObjects(targetMeshes, false);
         const hit = hits[0];
-        collabSelectedObjectId = hit
-          ? (hit.object.userData.furnitureId
-              ?? hit.object.userData.wallId
-              ?? hit.object.userData.doorId
-              ?? hit.object.userData.windowId
-              ?? hit.object.uuid)
-          : null;
+        collabSelectedObjectId = hit ? resolveCollabObjectId(hit.object.userData, hit.object.uuid) : null;
 
-        setCollabOutline(collabSelectedObjectId);
+        // Immediately anchor focus — ghost the rest of the scene and outline
+        // this object — the moment it's picked for a new comment, not after
+        // the comment is posted. The highlightedCommentObjectId subscription
+        // below owns the actual enter/exitFocusMode calls, so both this path
+        // and CollabPanel's existing-comment selection share one code path.
+        highlightedCommentObjectId.set(collabSelectedObjectId);
         commentInputVisible = collabSelectedObjectId !== null;
         commentInputText = '';
         markSceneDirty();
@@ -2272,12 +2271,7 @@
     scene.traverse((obj: any) => {
       if (collabOutlineHelper) return;
       if (!(obj as THREE.Mesh).isMesh) return;
-      const id =
-        obj.userData?.furnitureId ??
-        obj.userData?.wallId ??
-        obj.userData?.doorId ??
-        obj.userData?.windowId ??
-        obj.uuid;
+      const id = resolveCollabObjectId(obj.userData, obj.uuid);
       if (id !== objectId) return;
 
       const mesh = obj as THREE.Mesh;
@@ -2308,7 +2302,7 @@
     scene.traverse((obj: any) => {
       if (collabHoverOutline) return;
       if (!(obj as THREE.Mesh).isMesh) return;
-      const id = obj.userData?.furnitureId ?? obj.userData?.wallId ?? obj.userData?.doorId ?? obj.userData?.windowId ?? obj.uuid;
+      const id = resolveCollabObjectId(obj.userData, obj.uuid);
       if (id !== objectId) return;
 
       const mesh = obj as THREE.Mesh;
@@ -2425,7 +2419,8 @@
   function submitComment() {
     const text = commentInputText.trim();
     if (!text) return;
-    addComment(collabSelectedObjectId, text);
+    const newComment = addComment(collabSelectedObjectId, text);
+    focusedCommentId.set(newComment.id);
     commentInputText = '';
     commentInputVisible = false;
     markSceneDirty();
@@ -3949,12 +3944,16 @@
       canEdit = user.permissionLevel === 'full';
     });
 
-    // Collab panel → highlight object in 3D + focus mode
+    // Collab panel selection OR a new-comment click → highlight object in 3D + focus mode
     const unsubHighlight = highlightedCommentObjectId.subscribe(id => {
       if (!collaborationMode) return;
       setCollabOutline(id);
       if (id) {
-        // Find the comment text for the banner
+        // Retargeting while already focused (e.g. clicking a different object
+        // before posting a draft comment): restore the previous target first
+        // so ghost state doesn't stack. Uses restoreFocusVisuals, not
+        // exitFocusMode, so we don't also null out the store we're mid-update on.
+        if (focusMode) restoreFocusVisuals();
         const allComments = get(comments3D);
         const c = allComments.find(c => c.objectId === id);
         enterFocusMode(id, c?.text ?? '');
@@ -4467,7 +4466,7 @@
               </svg>
             </button>
             <button
-              onclick={() => { commentInputVisible = false; setCollabOutline(null); collabSelectedObjectId = null; commentInputText = ''; }}
+              onclick={() => { commentInputVisible = false; highlightedCommentObjectId.set(null); collabSelectedObjectId = null; commentInputText = ''; }}
               class="text-white/70 hover:text-white"
               aria-label="Close"
             >
@@ -4486,7 +4485,7 @@
             rows="3"
             autofocus
             class="w-full resize-none text-sm text-slate-700 border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400 placeholder-slate-300"
-            onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitComment(); } if (e.key === 'Escape') { commentInputVisible = false; setCollabOutline(null); collabSelectedObjectId = null; commentInputText = ''; } }}
+            onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitComment(); } if (e.key === 'Escape') { commentInputVisible = false; highlightedCommentObjectId.set(null); collabSelectedObjectId = null; commentInputText = ''; } }}
           ></textarea>
           <div class="flex items-center justify-between mt-2">
             <span class="text-[10px] text-slate-400">Ctrl+Enter to submit</span>
