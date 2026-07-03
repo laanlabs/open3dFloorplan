@@ -29,6 +29,7 @@
   import { roomTemplates, placeRoomTemplate } from '$lib/utils/roomTemplates';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
   import { activeUser, highlightedCommentObjectId, focusedCommentId, comments3D, addComment } from '$lib/stores/collaboration';
+  import { resolveCollabObjectId, shouldGhostMesh } from '$lib/utils/collabFocus';
 
   // Props
   const { collaborationMode = false }: { collaborationMode?: boolean } = $props();
@@ -138,11 +139,22 @@
   // Collaboration mode state
   let collabSelectedObjectId: string | null = null;
   // ── Collaboration highlight constants ──────────────────────────────────────
+  // Matches the brand-500 Tailwind token (src/app.css) — kept numeric since Three.js can't consume CSS vars.
   const HIGHLIGHT_COLOR      = new THREE.Color('#cb674c');
-  const HIGHLIGHT_EMISSIVE   = new THREE.Color('#cb674c');
-  const HIGHLIGHT_EMISSIVE_I = 0.12;
-  const DIM_OPACITY          = 0.30;
   const HOVER_OUTLINE_OPACITY = 0.55;
+  // Shared ghost/clay material for non-focused meshes in collab focus mode.
+  // One instance reused across every ghosted mesh — assigned wholesale to
+  // mesh.material (not mutated per-property) so painted colors/textures never
+  // bleed through, and restore is just "put the original material back."
+  const GHOST_MATERIAL = new THREE.MeshStandardMaterial({
+    color: 0x9ca3af, // Tailwind gray-400
+    roughness: 1,
+    metalness: 0,
+    transparent: true,
+    opacity: 0.35,
+    depthWrite: true,
+    depthTest: true,
+  });
   let commentInputText = $state('');
   let commentInputVisible = $state(false);
   let canEdit = true; // resolved from activeUser store subscription
@@ -154,13 +166,10 @@
   // Focus mode
   let focusMode = $state(false);
   let focusCommentText = $state('');
-  // Saved mesh state for focus mode restore: meshUuid → SavedMeshState
-  type SavedMeshState = {
-    opacity: number; transparent: boolean;
-    color: THREE.Color; emissive: THREE.Color; emissiveIntensity: number;
-    wireframe: boolean;
-  };
-  const meshOriginalOpacity = new Map<string, SavedMeshState>();
+  // Saved original material per ghosted mesh, keyed by mesh uuid, so exit can
+  // reassign it verbatim (handles both single materials and material arrays,
+  // e.g. wall ExtrudeGeometry's [reveal, interior, exterior] groups).
+  const meshOriginalMaterial = new Map<string, THREE.Material | THREE.Material[]>();
   // Camera position/target before focus so we can restore
   let preFocusCameraPos: THREE.Vector3 | null = null;
   let preFocusTarget: THREE.Vector3 | null = null;
@@ -1656,6 +1665,7 @@
     floorMesh.rotation.x = -Math.PI / 2;
     floorMesh.position.y = 0.5;
     floorMesh.receiveShadow = true;
+    floorMesh.userData.isFloor = true; // excluded from collab ghost/clay treatment
     scene.add(floorMesh);
 
     wallGroup = new THREE.Group();
@@ -2321,66 +2331,36 @@
   function enterFocusMode(objectId: string, commentText: string) {
     if (!scene || !camera) return;
 
-    // Find target object by named ID then by uuid
-    let targetObj: THREE.Object3D | null = null;
-    scene.traverse((obj: any) => {
-      if (targetObj) return;
-      if (obj.userData?.furnitureId === objectId && (obj as THREE.Mesh).isMesh) targetObj = obj;
-      else if (obj.userData?.wallId === objectId && (obj as THREE.Mesh).isMesh) targetObj = obj;
-      else if ((obj as THREE.Mesh).isMesh && obj.uuid === objectId) targetObj = obj;
-    });
-
-    // Collect UUIDs of every mesh that belongs to the target object tree
+    // Every mesh belonging to the focused object — walls/doors/windows/furniture
+    // can be represented by multiple mesh instances that all share the same
+    // domain id, so this is a direct scan rather than "find root, walk children."
     const targetUUIDs = new Set<string>();
-    if (targetObj) {
-      const collect = (o: THREE.Object3D) => {
-        if ((o as THREE.Mesh).isMesh) targetUUIDs.add(o.uuid);
-        o.children.forEach(collect);
-      };
-      collect(targetObj);
-    }
-
-    // Save and transform every mesh in the scene
-    meshOriginalOpacity.clear();
+    const targetMeshList: THREE.Mesh[] = [];
     scene.traverse((obj: any) => {
       if (!(obj as THREE.Mesh).isMesh) return;
       const mesh = obj as THREE.Mesh;
-
-      const mats = Array.isArray(mesh.material)
-        ? (mesh.material as THREE.MeshStandardMaterial[])
-        : [(mesh.material as THREE.MeshStandardMaterial)];
-      for (const mat of mats) {
-        if (!mat || meshOriginalOpacity.has(mat.uuid)) continue; // skip already-saved shared material
-        meshOriginalOpacity.set(mat.uuid, {
-          opacity:           mat.opacity,
-          transparent:       mat.transparent,
-          color:             mat.color.clone(),
-          emissive:          (mat.emissive ?? new THREE.Color(0)).clone(),
-          emissiveIntensity: mat.emissiveIntensity ?? 0,
-          wireframe:         mat.wireframe,
-        });
-        if (targetUUIDs.has(obj.uuid)) {
-          // Highlighted object: swap to corporate coral
-          mat.color.copy(HIGHLIGHT_COLOR);
-          mat.emissive.copy(HIGHLIGHT_EMISSIVE);
-          mat.emissiveIntensity = HIGHLIGHT_EMISSIVE_I;
-        } else if (obj.userData?.wallId) {
-          // Wall meshes: wireframe so room structure stays readable
-          mat.wireframe = true;
-        } else {
-          // Everything else: moderate dim
-          mat.transparent = true;
-          mat.opacity = DIM_OPACITY;
-        }
-        mat.needsUpdate = true;
-      }
+      if (resolveCollabObjectId(mesh.userData, mesh.uuid) !== objectId) return;
+      targetUUIDs.add(mesh.uuid);
+      targetMeshList.push(mesh);
     });
 
-    // Fly camera toward the highlighted object
-    if (targetObj) {
+    // Ghost every eligible mesh; leave the target, the floor, and other floors alone
+    meshOriginalMaterial.clear();
+    scene.traverse((obj: any) => {
+      if (!(obj as THREE.Mesh).isMesh) return;
+      const mesh = obj as THREE.Mesh;
+      if (!shouldGhostMesh(mesh.userData, mesh.uuid, targetUUIDs)) return;
+
+      meshOriginalMaterial.set(mesh.uuid, mesh.material);
+      mesh.material = GHOST_MATERIAL;
+    });
+
+    // Fly camera toward the highlighted object(s)
+    if (targetMeshList.length > 0) {
       preFocusCameraPos = camera.position.clone();
       preFocusTarget = controls.target.clone();
-      const box = new THREE.Box3().setFromObject(targetObj);
+      const box = new THREE.Box3();
+      for (const m of targetMeshList) box.expandByObject(m);
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
       const maxDim = Math.max(size.x, size.y, size.z);
@@ -2396,31 +2376,24 @@
     markSceneDirty();
   }
 
-  function exitFocusMode() {
-    // Restore every mesh to its saved state
+  /**
+   * Restores every ghosted mesh's original material and the pre-focus camera.
+   * Does not touch focusMode or the highlightedCommentObjectId/focusedCommentId
+   * stores — used both by exitFocusMode (full exit) and by the trigger
+   * subscription (Task 3) to rebase state before re-entering focus on a
+   * different target, so retargeting doesn't stack ghost state or leave the
+   * pre-focus camera position pointing at an intermediate target.
+   */
+  function restoreFocusVisuals() {
     scene.traverse((obj: any) => {
       if (!(obj as THREE.Mesh).isMesh) return;
       const mesh = obj as THREE.Mesh;
-
-      const mats = Array.isArray(mesh.material)
-        ? (mesh.material as THREE.MeshStandardMaterial[])
-        : [(mesh.material as THREE.MeshStandardMaterial)];
-      for (const mat of mats) {
-        if (!mat) continue;
-        const saved = meshOriginalOpacity.get(mat.uuid);
-        if (!saved) continue;
-        mat.color.copy(saved.color);
-        if (mat.emissive !== undefined) mat.emissive.copy(saved.emissive);
-        mat.emissiveIntensity = saved.emissiveIntensity;
-        mat.opacity           = saved.opacity;
-        mat.transparent       = saved.transparent;
-        mat.wireframe         = saved.wireframe;
-        mat.needsUpdate = true;
-      }
+      const saved = meshOriginalMaterial.get(mesh.uuid);
+      if (!saved) return;
+      mesh.material = saved;
     });
-    meshOriginalOpacity.clear();
+    meshOriginalMaterial.clear();
 
-    // Restore camera
     if (preFocusCameraPos && preFocusTarget) {
       camera.position.copy(preFocusCameraPos);
       controls.target.copy(preFocusTarget);
@@ -2428,6 +2401,10 @@
       preFocusCameraPos = null;
       preFocusTarget = null;
     }
+  }
+
+  function exitFocusMode() {
+    restoreFocusVisuals();
 
     if (collabHoverOutline) {
       collabHoverOutline.geometry.dispose();
@@ -3203,7 +3180,10 @@
       // Build non-active floor into a temporary group, then merge with transparency
       const tempGroup = new THREE.Group();
       buildFloorIntoGroup(floor, tempGroup, i * FLOOR_HEIGHT, 0.35);
-      
+      // Tag every mesh as belonging to a non-active floor so collab focus mode
+      // leaves it alone (stays at the exploded-view 0.35 opacity, never ghosted).
+      tempGroup.traverse(o => { o.userData.isOtherFloor = true; });
+
       // Add floor label
       addFloorLabel(i, floor.name || (i === 0 ? 'Ground Floor' : `Floor ${i}`), i * FLOOR_HEIGHT);
       
