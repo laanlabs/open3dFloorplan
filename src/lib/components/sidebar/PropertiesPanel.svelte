@@ -3,6 +3,7 @@
   import { floorMaterials, wallColors } from '$lib/utils/materials';
   import { getCatalogItem } from '$lib/utils/furnitureCatalog';
   import { projectSettings, formatLength, formatArea } from '$lib/stores/settings';
+  import { base } from '$app/paths';
   import type { Floor, Wall, Door, Window as Win, Room, FurnitureItem, Stair, Column, RoomCategory, TextAnnotation } from '$lib/models/types';
 
   let floor = $state<Floor | null>(null);
@@ -292,14 +293,19 @@
   });
 
   const floorTexPaths: Record<string, string> = {
-    'light-oak': '/textures/floor-light-oak.jpg', 'walnut': '/textures/floor-walnut.jpg',
-    'bamboo': '/textures/floor-bamboo.jpg', 'laminate': '/textures/floor-laminate.jpg',
-    'ceramic-white': '/textures/floor-tile-white.jpg', 'ceramic-gray': '/textures/floor-tile-gray.jpg',
-    'porcelain': '/textures/floor-porcelain.jpg',
-    'marble-white': '/textures/floor-marble-white.jpg', 'marble-dark': '/textures/floor-marble-dark.jpg',
-    'carpet-beige': '/textures/floor-carpet-beige.jpg', 'carpet-gray': '/textures/floor-carpet-gray.jpg',
-    'concrete': '/textures/floor-concrete.jpg', 'slate': '/textures/floor-slate.jpg',
-    'vinyl': '/textures/floor-vinyl.jpg',
+    'light-oak': `${base}/textures/floor-light-oak.jpg`, 'walnut': `${base}/textures/floor-walnut.jpg`,
+    'bamboo': `${base}/textures/floor-bamboo.jpg`, 'laminate': `${base}/textures/floor-laminate.jpg`,
+    'ceramic-white': `${base}/textures/floor-tile-white.jpg`, 'ceramic-gray': `${base}/textures/floor-tile-gray.jpg`,
+    'porcelain': `${base}/textures/floor-porcelain.jpg`,
+    'marble-white': `${base}/textures/floor-marble-white.jpg`, 'marble-dark': `${base}/textures/floor-marble-dark.jpg`,
+    'carpet-beige': `${base}/textures/floor-carpet-beige.jpg`, 'carpet-gray': `${base}/textures/floor-carpet-gray.jpg`,
+    'concrete': `${base}/textures/floor-concrete.jpg`, 'slate': `${base}/textures/floor-slate.jpg`,
+    'vinyl': `${base}/textures/floor-vinyl.jpg`,
+  };
+  const wallTexPaths: Record<string, string> = {
+    'red-brick': `${base}/textures/brick.jpg`, 'exposed-brick': `${base}/textures/exposed-brick.jpg`,
+    'stone': `${base}/textures/stone.jpg`, 'wood-panel': `${base}/textures/wood-panel.jpg`,
+    'concrete-block': `${base}/textures/concrete.jpg`, 'subway-tile': `${base}/textures/subway-tile.jpg`,
   };
   const textureGroups = [
     { label: '🎨 Plain', ids: ['none'] },
@@ -392,7 +398,7 @@
                 onclick={() => { if (selectedWall) updateWall(selectedWall.id, { interiorTexture: 'none' }); }}
               >None</button>
               {#each wallColors.filter(wc => wc.texture) as wc}
-                {@const texPath = ({ 'red-brick': '/textures/brick.jpg', 'exposed-brick': '/textures/exposed-brick.jpg', 'stone': '/textures/stone.jpg', 'wood-panel': '/textures/wood-panel.jpg', 'concrete-block': '/textures/concrete.jpg', 'subway-tile': '/textures/subway-tile.jpg' })[wc.id] ?? ''}
+                {@const texPath = wallTexPaths[wc.id] ?? ''}
                 <button
                   class="rounded-md border-2 text-[10px] text-center h-14 flex flex-col items-center justify-end overflow-hidden relative {sideTex === wc.id ? 'border-blue-500 ring-1 ring-blue-200' : 'border-gray-200 hover:border-gray-300'}"
                   style={texPath ? `background-image: url(${texPath}); background-size: cover; background-position: center;` : `background-color: ${wc.color}20`}
@@ -427,7 +433,7 @@
                 onclick={() => { if (selectedWall) updateWall(selectedWall.id, { exteriorTexture: 'none' }); }}
               >None</button>
               {#each wallColors.filter(wc => wc.texture) as wc}
-                {@const texPath = ({ 'red-brick': '/textures/brick.jpg', 'exposed-brick': '/textures/exposed-brick.jpg', 'stone': '/textures/stone.jpg', 'wood-panel': '/textures/wood-panel.jpg', 'concrete-block': '/textures/concrete.jpg', 'subway-tile': '/textures/subway-tile.jpg' })[wc.id] ?? ''}
+                {@const texPath = wallTexPaths[wc.id] ?? ''}
                 <button
                   class="rounded-md border-2 text-[10px] text-center h-14 flex flex-col items-center justify-end overflow-hidden relative {sideTex === wc.id ? 'border-blue-500 ring-1 ring-blue-200' : 'border-gray-200 hover:border-gray-300'}"
                   style={texPath ? `background-image: url(${texPath}); background-size: cover; background-position: center;` : `background-color: ${wc.color}20`}

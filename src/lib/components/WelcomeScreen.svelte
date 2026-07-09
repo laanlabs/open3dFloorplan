@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import { localStore } from '$lib/services/datastore';
   import { createDefaultProject, currentProject } from '$lib/stores/project';
   import { houseTemplates } from '$lib/utils/houseTemplates';
@@ -26,7 +27,7 @@
     currentProject.set(p);
     await localStore.save(p);
     markSeen();
-    goto(`/editor?id=${p.id}`);
+    goto(`${base}/editor?id=${p.id}`);
   }
 
   async function useHouseTemplate(index: number) {
@@ -35,7 +36,7 @@
     currentProject.set(p);
     await localStore.save(p);
     markSeen();
-    goto(`/editor?id=${p.id}`);
+    goto(`${base}/editor?id=${p.id}`);
   }
 
   let showTemplates = $state(false);
@@ -60,7 +61,7 @@
         currentProject.set(data);
         await localStore.save(data);
         markSeen();
-        goto(`/editor?id=${data.id}`);
+        goto(`${base}/editor?id=${data.id}`);
       } else {
         alert('Unrecognized file format');
       }

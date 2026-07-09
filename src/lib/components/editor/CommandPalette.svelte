@@ -5,6 +5,7 @@
   import { exportDXF } from '$lib/utils/cadExport';
   import { get } from 'svelte/store';
   import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
 
   interface Props {
     open: boolean;
@@ -46,7 +47,7 @@
     { id: 'a-undo', name: 'Undo', icon: '⚡', category: 'action', categoryLabel: '⚡ Action', action: () => undo() },
     { id: 'a-redo', name: 'Redo', icon: '⚡', category: 'action', categoryLabel: '⚡ Action', action: () => redo() },
     { id: 'a-settings', name: 'Settings', icon: '⚡', category: 'action', categoryLabel: '⚡ Action', action: () => { window.dispatchEvent(new CustomEvent('open-settings')); } },
-    { id: 'a-new-project', name: 'New Project', icon: '⚡', category: 'action', categoryLabel: '⚡ Action', action: () => goto('/') },
+    { id: 'a-new-project', name: 'New Project', icon: '⚡', category: 'action', categoryLabel: '⚡ Action', action: () => goto(base || '/') },
     { id: 'a-toggle-3d', name: 'Toggle 2D/3D', icon: '⚡', category: 'action', categoryLabel: '⚡ Action', action: () => { viewMode.update(m => m === '2d' ? '3d' : '2d'); } },
   ];
 

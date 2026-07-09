@@ -5,6 +5,7 @@
  */
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { base } from '$app/paths';
 import { createFurnitureModel } from './furnitureModels3d';
 import type { FurnitureDef } from './furnitureCatalog';
 
@@ -175,7 +176,7 @@ function loadGLBModel(catalogId: string): Promise<THREE.Group | null> {
 
   const promise = new Promise<THREE.Group | null>((resolve) => {
     loader.load(
-      `/models/${mapping.file}.glb`,
+      `${base}/models/${mapping.file}.glb`,
       (gltf) => {
         const group = new THREE.Group();
         // Clone the scene into our group
