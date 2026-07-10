@@ -189,3 +189,28 @@ Access is controlled by [`storage.rules`](storage.rules): public **read** and **
    # or
    gsutil lifecycle set lifecycle.json gs://openplan3d.firebasestorage.app
    ```
+
+4. **CORS** — the editor downloads captures from the browser, so the bucket must allow
+   cross-origin GETs (without this the import fails with a CORS error in the console).
+   Save this as `cors.json`:
+
+   ```json
+   [
+     {
+       "origin": [
+         "https://app.openplan3d.com",
+         "https://openplan3d--openplan3d.us-east4.hosted.app",
+         "http://localhost:5173"
+       ],
+       "method": ["GET"],
+       "responseHeader": ["Content-Type"],
+       "maxAgeSeconds": 3600
+     }
+   ]
+   ```
+
+   Then apply it (changes take a minute or two to propagate):
+
+   ```bash
+   gcloud storage buckets update gs://openplan3d.firebasestorage.app --cors-file=cors.json
+   ```
