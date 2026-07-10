@@ -247,32 +247,64 @@ function shoelace(pts: Point[]): number {
 }
 
 /**
- * Get polygon vertices for a room from its walls
+ * Get polygon vertices for a room from its walls.
+ *
+ * detectRooms() traces cycles over walls split at T-junctions, so a room may
+ * border only a sub-segment of a wall. Chaining full wall segments here would
+ * overshoot the room at such walls and break the loop (partial polygons with a
+ * spurious diagonal closing edge), so we chain the same split edges instead.
  */
 export function getRoomPolygon(room: Room, walls: Wall[]): Point[] {
-  const roomWalls = walls.filter(w => room.walls.includes(w.id));
-  if (roomWalls.length < 3) return [];
+  const wallIds = new Set(room.walls);
+  if (walls.filter(w => wallIds.has(w.id)).length < 3) return [];
 
-  // Build ordered vertices
-  const verts: Point[] = [];
-  const used = new Set<string>();
-  
-  // Start from first wall
-  let current = roomWalls[0];
-  verts.push(current.start);
-  used.add(current.id);
-  let tip = current.end;
+  let edges = splitWallsAtTJunctions(walls).filter(e => wallIds.has(e.wallId));
 
-  for (let i = 0; i < roomWalls.length - 1; i++) {
-    verts.push(tip);
-    const next = roomWalls.find(w => !used.has(w.id) && (ptEq(w.start, tip) || ptEq(w.end, tip)));
-    if (!next) break;
-    used.add(next.id);
-    tip = ptEq(next.start, tip) ? next.end : next.start;
-    current = next;
+  // Iteratively prune dangling sub-segments (parts of split walls that extend
+  // past the room and connect to nothing else on this room's boundary).
+  let pruned = true;
+  while (pruned && edges.length >= 3) {
+    pruned = false;
+    edges = edges.filter(e => {
+      const degStart = edges.filter(o => ptEq(o.start, e.start) || ptEq(o.end, e.start)).length;
+      const degEnd = edges.filter(o => ptEq(o.start, e.end) || ptEq(o.end, e.end)).length;
+      // Each count includes the edge itself; < 2 means the endpoint dangles
+      if (degStart < 2 || degEnd < 2) { pruned = true; return false; }
+      return true;
+    });
+  }
+  if (edges.length < 3) return [];
+
+  // Chain edges into ordered loops; return the largest closed one,
+  // falling back to the longest open chain if no loop closes.
+  const used = new Set<Edge>();
+  let best: Point[] = [];
+  let bestArea = 0;
+  let longestOpen: Point[] = [];
+
+  for (const startEdge of edges) {
+    if (used.has(startEdge)) continue;
+    const verts: Point[] = [startEdge.start];
+    used.add(startEdge);
+    let tip = startEdge.end;
+
+    while (!ptEq(tip, verts[0])) {
+      verts.push(tip);
+      const next = edges.find(e => !used.has(e) && (ptEq(e.start, tip) || ptEq(e.end, tip)));
+      if (!next) break;
+      used.add(next);
+      tip = ptEq(next.start, tip) ? next.end : next.start;
+    }
+
+    if (ptEq(tip, verts[0])) {
+      const area = Math.abs(shoelace(verts));
+      if (area > bestArea) { bestArea = area; best = verts; }
+    } else if (verts.length > longestOpen.length) {
+      longestOpen = verts;
+    }
   }
 
-  return verts;
+  return best.length >= 3 ? best : longestOpen;
 }
 
 export function roomCentroid(polygon: Point[]): Point {
