@@ -1619,7 +1619,11 @@ export function drawMinimap(
     const fw = Math.max(2, (fi.width ?? cat.width) * scale);
     const fd = Math.max(2, (fi.depth ?? cat.depth) * scale);
     mctx.fillStyle = (fi.color ?? cat.color) + 'aa';
-    mctx.fillRect(p.x - fw / 2, p.y - fd / 2, fw, fd);
+    mctx.save();
+    mctx.translate(p.x, p.y);
+    mctx.rotate((fi.rotation * Math.PI) / 180);
+    mctx.fillRect(-fw / 2, -fd / 2, fw, fd);
+    mctx.restore();
   }
 
   const { width, height, zoom, camX, camY } = cs;
