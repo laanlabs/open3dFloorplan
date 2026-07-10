@@ -9,9 +9,8 @@
   import type { FurnitureDef } from '$lib/utils/furnitureCatalog';
   import { getModelFile, generateThumbnail, getThumbnail, preloadThumbnails } from '$lib/utils/furnitureThumbnails';
   import { onMount } from 'svelte';
-  import { importRoomPlan, extractRoomJsonFromZip, ORTHO_VERSION } from '$lib/utils/roomplanImport';
-  import { currentProject, loadProject, importFloorIntoCurrentProject, createDefaultProject } from '$lib/stores/project';
-  import type { Project } from '$lib/models/types';
+  import { createProjectFromRoomPlan, extractRoomJsonFromZip, ORTHO_VERSION } from '$lib/utils/roomplanImport';
+  import { currentProject, loadProject } from '$lib/stores/project';
 
   // AreaSummaryPanel moved to top bar dialog
   let activeTab = $state<'draw' | 'rooms' | 'objects'>('draw');
@@ -258,21 +257,13 @@
   function confirmImport() {
     if (!importJsonData) return;
     try {
-      const floor = importRoomPlan(importJsonData, {
+      // Create a new project for the imported data instead of merging into current
+      const projectName = importFileName ? importFileName.replace(/\.(json|zip)$/i, '') : 'RoomPlan Import';
+      const newProject = createProjectFromRoomPlan(importJsonData, projectName, {
         straighten: optStraighten,
         orthogonal: optOrthogonal,
         mergeDistance: optMergeDistance,
       });
-      // Create a new project for the imported data instead of merging into current
-      const projectName = importFileName ? importFileName.replace(/\.(json|zip)$/i, '') : 'RoomPlan Import';
-      const newProject = createDefaultProject(projectName);
-      const activeFloor = newProject.floors[0];
-      activeFloor.walls = floor.walls;
-      activeFloor.doors = floor.doors;
-      activeFloor.windows = floor.windows;
-      activeFloor.furniture = floor.furniture;
-      if (floor.stairs) activeFloor.stairs = floor.stairs;
-      if (floor.columns) activeFloor.columns = floor.columns;
       loadProject(newProject);
     } catch (e: any) {
       alert('Failed to import RoomPlan: ' + e.message);

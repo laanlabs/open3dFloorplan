@@ -6,7 +6,8 @@
  * Our coordinate system: 2D XY in centimeters (roomplan X→our X, roomplan Z→our Y)
  */
 
-import type { Floor, Wall, Door, Window, FurnitureItem, Room, Point } from '$lib/models/types';
+import type { Floor, Wall, Door, Window, FurnitureItem, Room, Point, Project } from '$lib/models/types';
+import { createDefaultProject } from '$lib/stores/project';
 
 function uid(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -717,4 +718,38 @@ export async function extractRoomJsonFromZip(zipFile: File): Promise<any> {
 
   const content = await roomJsonFile.async('string');
   return JSON.parse(content);
+}
+
+/** Quick structural check that data looks like an Apple RoomPlan JSON export */
+export function isRoomPlanJson(data: any): boolean {
+  return !!data && Array.isArray(data.walls) && data.walls.length > 0 && !!data.walls[0]?.dimensions;
+}
+
+/** Default import options — same defaults the import options dialog starts with */
+export const DEFAULT_ROOMPLAN_OPTIONS: RoomPlanImportOptions = {
+  straighten: true,
+  orthogonal: true,
+  mergeDistance: 15,
+};
+
+/**
+ * Build a brand-new project from RoomPlan JSON data (walls/doors/windows/furniture
+ * placed on the first floor). Shared by the file-import dialog and the iOS capture
+ * handoff (`/editor?import=CODE`). Caller is responsible for loading/saving it.
+ */
+export function createProjectFromRoomPlan(
+  jsonData: any,
+  name: string,
+  options: RoomPlanImportOptions = DEFAULT_ROOMPLAN_OPTIONS
+): Project {
+  const floor = importRoomPlan(jsonData, options);
+  const project = createDefaultProject(name || 'RoomPlan Import');
+  const activeFloor = project.floors[0];
+  activeFloor.walls = floor.walls;
+  activeFloor.doors = floor.doors;
+  activeFloor.windows = floor.windows;
+  activeFloor.furniture = floor.furniture;
+  if (floor.stairs) activeFloor.stairs = floor.stairs;
+  if (floor.columns) activeFloor.columns = floor.columns;
+  return project;
 }

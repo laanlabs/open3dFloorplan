@@ -136,3 +136,56 @@ This project is licensed under the [MIT License](LICENSE).
 <p align="center">
   <b>Built with ❤️ for architects, designers, and anyone who needs a floor plan.</b>
 </p>
+
+---
+
+## 📱 iOS capture handoff
+
+The companion iOS app can hand a fresh [Apple RoomPlan](https://developer.apple.com/augmented-reality/roomplan/) scan directly to the web editor via Firebase Storage:
+
+1. The iOS app uploads the RoomPlan `room.json` to Firebase Storage at `inbox/{CODE}.json` in the `openplan3d.firebasestorage.app` bucket, where `CODE` is 8 characters from `[A-Z2-9]` (I, O, 0 and 1 are excluded to avoid ambiguity).
+2. The app shows a QR code / link of the form:
+
+   ```
+   https://app.openplan3d.com/editor?import=CODE
+   ```
+
+3. When the editor opens with an `import` query param, it downloads the JSON straight from Firebase Storage (no SDK needed):
+
+   ```
+   https://firebasestorage.googleapis.com/v0/b/openplan3d.firebasestorage.app/o/inbox%2F{CODE}.json?alt=media
+   ```
+
+   and imports it through the regular RoomPlan pipeline (default options: straighten + orthogonal), creating a new project. On success the `import` param is replaced with the new project's `id` so a refresh won't re-import.
+
+Access is controlled by [`storage.rules`](storage.rules): public **read** and **create** are allowed only on `inbox/{CODE}.json` (content type `application/json`, < 10 MB); updates, deletes, and everything else in the bucket are denied.
+
+### One-time setup (project owner)
+
+1. **Enable Storage** for the `openplan3d` project in the [Firebase console](https://console.firebase.google.com/project/openplan3d/storage) if it isn't already.
+2. **Deploy the rules:**
+
+   ```bash
+   firebase deploy --only storage
+   ```
+
+3. **Auto-delete stale captures** — set a lifecycle rule that deletes objects under the `inbox/` prefix after 1 day (prefix-scoped lifecycle uses `matchesPrefix`). Save this as `lifecycle.json`:
+
+   ```json
+   {
+     "rule": [
+       {
+         "action": { "type": "Delete" },
+         "condition": { "age": 1, "matchesPrefix": ["inbox/"] }
+       }
+     ]
+   }
+   ```
+
+   Then apply it with either:
+
+   ```bash
+   gcloud storage buckets update gs://openplan3d.firebasestorage.app --lifecycle-file=lifecycle.json
+   # or
+   gsutil lifecycle set lifecycle.json gs://openplan3d.firebasestorage.app
+   ```
