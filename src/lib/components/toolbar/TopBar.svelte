@@ -27,6 +27,9 @@
   import { triggerTip } from '$lib/stores/onboarding.svelte';
   let snapOn = $state(true);
   let exportRef: HTMLDivElement;
+  // Mobile (< md) overflow menu for secondary actions
+  let moreOpen = $state(false);
+  let moreRef: HTMLDivElement | undefined = $state();
 
   currentProject.subscribe((p) => {
     if (p) {
@@ -167,9 +170,13 @@
       if (exportOpen && exportRef && !exportRef.contains(e.target as Node)) {
         exportOpen = false;
       }
+      if (moreOpen && moreRef && !moreRef.contains(e.target as Node)) {
+        moreOpen = false;
+      }
     }
     function handleKeydown(e: KeyboardEvent) {
       if (exportOpen) exportOpen = false;
+      if (e.key === 'Escape' && moreOpen) moreOpen = false;
       if (e.key === 'Escape' && versionHistoryOpen) versionHistoryOpen = false;
       if (e.key === 'Escape' && areaOpen) areaOpen = false;
     }
@@ -228,7 +235,7 @@
   }
 </script>
 
-<div class="h-12 bg-gradient-to-r from-slate-800 to-slate-700 flex items-center px-4 gap-3 shrink-0 shadow-sm">
+<div class="h-12 bg-gradient-to-r from-slate-800 to-slate-700 flex items-center px-4 gap-3 max-md:px-2 max-md:gap-1 shrink-0 shadow-sm">
   <!-- Back to Projects -->
   <a
     href={base || '/'}
@@ -239,7 +246,7 @@
     <span class="hidden sm:inline">Projects</span>
   </a>
 
-  <div class="h-5 w-px bg-white/20"></div>
+  <div class="h-5 w-px bg-white/20 max-md:hidden"></div>
 
   {#if editingName}
     <input
@@ -251,16 +258,16 @@
     />
   {:else}
     <button
-      class="font-semibold text-white text-sm hover:bg-white/10 px-2 py-0.5 rounded transition-colors"
+      class="font-semibold text-white text-sm hover:bg-white/10 px-2 py-0.5 rounded transition-colors max-w-[12rem] truncate max-md:max-w-[4rem]"
       onclick={() => editingName = true}
       title="Click to rename"
     >{projectName}</button>
   {/if}
 
-  <div class="h-5 w-px bg-white/20"></div>
+  <div class="h-5 w-px bg-white/20 max-md:hidden"></div>
 
-  <!-- Floor selector as buttons -->
-  <div class="flex items-center gap-1">
+  <!-- Floor selector as buttons (in overflow menu on mobile) -->
+  <div class="flex items-center gap-1 max-md:hidden">
     {#each floors as fl}
       <button
         class="px-2 py-0.5 text-xs rounded transition-colors {fl.id === activeFloorId ? 'bg-white text-slate-800 font-semibold' : 'text-white/80 hover:bg-white/10'}"
@@ -287,12 +294,12 @@
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/></svg>
   </button>
 
-  <div class="h-5 w-px bg-white/20"></div>
+  <div class="h-5 w-px bg-white/20 max-md:hidden"></div>
 
   <!-- Snap to grid toggle -->
   <button
     onclick={() => { snapEnabled.update(v => !v); snapOn = !snapOn; }}
-    class="p-1.5 rounded transition-colors {snapOn ? 'text-white bg-white/20' : 'text-white/40 hover:text-white/70 hover:bg-white/10'}"
+    class="p-1.5 rounded transition-colors max-md:hidden {snapOn ? 'text-white bg-white/20' : 'text-white/40 hover:text-white/70 hover:bg-white/10'}"
     title="Snap to Grid ({snapOn ? 'On' : 'Off'})"
     aria-label="Snap to Grid"
   >
@@ -301,9 +308,9 @@
     </svg>
   </button>
 
-  <!-- Select / Pan toggle -->
+  <!-- Select / Pan toggle (mobile pans with two fingers; toggle lives in overflow menu) -->
   {#if mode === '2d'}
-  <div class="flex bg-white/15 rounded-full p-0.5">
+  <div class="flex bg-white/15 rounded-full p-0.5 max-md:hidden">
     <button
       onclick={() => panMode.set(false)}
       class="px-2 py-1 text-xs font-semibold rounded-full transition-colors {!$panMode ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
@@ -326,7 +333,7 @@
   <!-- Furniture visibility toggle -->
   <button
     onclick={() => layerVisibility.update(v => ({ ...v, furniture: !v.furniture }))}
-    class="p-1.5 rounded transition-colors {$showFurnitureStore ? 'text-white bg-white/20' : 'text-white/40 hover:text-white/70 hover:bg-white/10'}"
+    class="p-1.5 rounded transition-colors max-md:hidden {$showFurnitureStore ? 'text-white bg-white/20' : 'text-white/40 hover:text-white/70 hover:bg-white/10'}"
     title="Toggle Furniture ({$showFurnitureStore ? 'Visible' : 'Hidden'})"
     aria-label="Toggle Furniture"
   >
@@ -335,23 +342,23 @@
     </svg>
   </button>
 
-  <div class="h-5 w-px bg-white/20"></div>
+  <div class="h-5 w-px bg-white/20 max-md:hidden"></div>
 
   <!-- 2D/3D pill toggle -->
   <div class="flex bg-white/15 rounded-full p-0.5">
     <button
       onclick={() => setMode('2d')}
-      class="px-3 py-1 text-xs font-semibold rounded-full transition-colors {mode === '2d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+      class="px-3 max-md:px-2 py-1 text-xs font-semibold rounded-full transition-colors {mode === '2d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
     >2D</button>
     <button
       onclick={() => setMode('3d')}
-      class="px-3 py-1 text-xs font-semibold rounded-full transition-colors {mode === '3d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+      class="px-3 max-md:px-2 py-1 text-xs font-semibold rounded-full transition-colors {mode === '3d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
     >3D</button>
   </div>
 
-  <!-- Zoom controls (2D only) -->
+  <!-- Zoom controls (2D only; mobile uses pinch + overflow menu) -->
   {#if mode === '2d'}
-    <div class="flex items-center gap-1 bg-white/15 rounded-full p-0.5">
+    <div class="flex items-center gap-1 bg-white/15 rounded-full p-0.5 max-md:hidden">
       <button
         onclick={() => canvasZoom.update(z => Math.max(0.1, z / 1.25))}
         class="w-7 h-7 flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 rounded-full transition-colors text-sm font-bold"
@@ -375,7 +382,7 @@
   <!-- Version History button -->
   <button
     onclick={() => versionHistoryOpen = true}
-    class="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
+    class="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors max-md:hidden"
     title="Version History"
     aria-label="Version History"
   >
@@ -385,7 +392,7 @@
   <!-- Area summary button -->
   <button
     onclick={() => areaOpen = true}
-    class="px-2 py-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
+    class="px-2 py-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors max-md:hidden"
     title="Area Summary"
     aria-label="Area Summary"
   >
@@ -395,23 +402,64 @@
   <!-- Settings button -->
   <button
     onclick={() => settingsOpen = true}
-    class="px-2 py-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
+    class="px-2 py-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors max-md:hidden"
     title="Settings"
     aria-label="Settings"
   >
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
   </button>
 
-  <div class="h-5 w-px bg-white/20"></div>
+  <!-- Overflow menu (mobile only): secondary actions hidden from the condensed bar -->
+  <div class="relative md:hidden" bind:this={moreRef}>
+    <button
+      onclick={() => moreOpen = !moreOpen}
+      class="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded transition-colors"
+      title="More"
+      aria-label="More actions"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+    </button>
+    {#if moreOpen}
+      <div class="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 w-56 z-50 max-h-[70vh] overflow-y-auto">
+        {#if floors.length > 1 || mode === '2d'}
+          <div class="px-3 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-gray-400">Floors</div>
+          {#each floors as fl}
+            <button class="w-full px-3 py-2 text-sm hover:bg-gray-100 text-left flex items-center gap-2 {fl.id === activeFloorId ? 'text-blue-600 font-semibold' : 'text-gray-700'}" onclick={() => { setActiveFloor(fl.id); moreOpen = false; }}>
+              {fl.name}{fl.id === activeFloorId ? ' ✓' : ''}
+            </button>
+          {/each}
+          <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { onAddFloor(); }}>+ Add Floor</button>
+          <div class="h-px bg-gray-100 my-1"></div>
+        {/if}
+        {#if mode === '2d'}
+          <div class="px-3 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-gray-400">View</div>
+          <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => canvasZoom.update(z => Math.min(10, z * 1.25))}>Zoom In</button>
+          <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => canvasZoom.update(z => Math.max(0.1, z / 1.25))}>Zoom Out</button>
+          <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => canvasZoom.set(1)}>Reset Zoom ({Math.round($canvasZoom * 100)}%)</button>
+          <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => panMode.update(v => !v)}>{$panMode ? '✓ ' : ''}Pan Mode</button>
+          <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { snapEnabled.update(v => !v); snapOn = !snapOn; }}>{snapOn ? '✓ ' : ''}Snap to Grid</button>
+          <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => layerVisibility.update(v => ({ ...v, furniture: !v.furniture }))}>{$showFurnitureStore ? '✓ ' : ''}Show Furniture</button>
+          <div class="h-px bg-gray-100 my-1"></div>
+        {/if}
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { versionHistoryOpen = true; moreOpen = false; }}>Version History</button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { areaOpen = true; moreOpen = false; }}>Area Summary</button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { settingsOpen = true; moreOpen = false; }}>Settings</button>
+      </div>
+    {/if}
+  </div>
+
+  <div class="h-5 w-px bg-white/20 max-md:hidden"></div>
 
   <!-- Export dropdown -->
   <div class="relative" bind:this={exportRef}>
     <button
       onclick={() => { exportOpen = !exportOpen; if (exportOpen) triggerTip('first-export', 300, 60); }}
-      class="px-3 py-1.5 text-sm text-white/90 hover:text-white hover:bg-white/10 rounded transition-colors flex items-center gap-1.5"
+      class="px-3 py-1.5 max-md:px-2 text-sm text-white/90 hover:text-white hover:bg-white/10 rounded transition-colors flex items-center gap-1.5"
+      title="Export"
+      aria-label="Export"
     >
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      Export
+      <span class="max-md:hidden">Export</span>
     </button>
     {#if exportOpen}
       <div class="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 w-48 z-50">
@@ -462,7 +510,7 @@
   </div>
 
   <span
-    class="text-[11px] font-medium transition-all duration-300 {$saveState === 'saved' ? 'text-emerald-400' : $saveState === 'saving' ? 'text-amber-300 animate-pulse' : 'text-white/50'}"
+    class="text-[11px] font-medium transition-all duration-300 max-md:hidden {$saveState === 'saved' ? 'text-emerald-400' : $saveState === 'saving' ? 'text-amber-300 animate-pulse' : 'text-white/50'}"
     title={lastSavedText || 'Not saved yet'}
   >
     {#if $saveState === 'saving'}
@@ -473,7 +521,7 @@
       Unsaved •
     {/if}
   </span>
-  <button onclick={save} class="px-3 py-1.5 text-sm bg-white text-slate-800 font-semibold rounded-lg hover:bg-blue-50 transition-colors shadow-sm">
+  <button onclick={save} class="px-3 py-1.5 max-md:px-2.5 text-sm bg-white text-slate-800 font-semibold rounded-lg hover:bg-blue-50 transition-colors shadow-sm">
     Save
   </button>
 </div>
@@ -485,7 +533,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onclick={() => areaOpen = false} onkeydown={(e) => { if (e.key === 'Escape') areaOpen = false; }}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="bg-white rounded-xl shadow-2xl w-[420px] max-h-[80vh] overflow-hidden" onclick={(e) => e.stopPropagation()}>
+  <div class="bg-white rounded-xl shadow-2xl w-[420px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-hidden" onclick={(e) => e.stopPropagation()}>
     <div class="flex items-center justify-between px-5 py-3 border-b border-gray-200">
       <h2 class="text-base font-semibold text-gray-800">📐 Area Summary</h2>
       <button onclick={() => areaOpen = false} class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>

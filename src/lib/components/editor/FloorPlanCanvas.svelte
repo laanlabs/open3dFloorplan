@@ -1818,7 +1818,14 @@
     }
     document.addEventListener('paste', handlePaste);
 
-    return () => { resizeObs.disconnect(); unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub9(); unsub10(); unsub11(); unsub12(); unsub13(); unsub_multi(); unsub14(); unsub_col(); unsub_cols(); unsub_layers(); unsub_snapgrid(); unsubEnt1(); unsubEnt2(); document.removeEventListener('paste', handlePaste); };
+    // Touch input — registered manually so the handlers are non-passive
+    // (Svelte attaches touch listeners passively, which blocks preventDefault)
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+    canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
+
+    return () => { resizeObs.disconnect(); unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub9(); unsub10(); unsub11(); unsub12(); unsub13(); unsub_multi(); unsub14(); unsub_col(); unsub_cols(); unsub_layers(); unsub_snapgrid(); unsubEnt1(); unsubEnt2(); document.removeEventListener('paste', handlePaste); canvas.removeEventListener('touchstart', onTouchStart); canvas.removeEventListener('touchmove', onTouchMove); canvas.removeEventListener('touchend', onTouchEnd); canvas.removeEventListener('touchcancel', onTouchEnd); };
   });
 
   /** Compute world bounding box of all elements */
@@ -2942,6 +2949,101 @@
     }
   }
 
+  // ── Touch input (phones/tablets) ──────────────────────────────────
+  // One finger drives the existing mouse pipeline via synthetic MouseEvents
+  // (so every tool works unchanged); two fingers pinch-zoom and pan.
+  // Listeners are registered manually in onMount with { passive: false }
+  // because we must preventDefault to stop scrolling and the browser's
+  // compatibility mouse events (which would double-fire the handlers).
+  let pinchState: { dist: number; cx: number; cy: number } | null = null;
+  let singleTouchActive = false;
+  let lastTapTime = 0;
+  let lastTapX = 0;
+  let lastTapY = 0;
+
+  function dispatchMouse(type: 'mousedown' | 'mousemove' | 'mouseup' | 'click' | 'dblclick', clientX: number, clientY: number) {
+    canvas.dispatchEvent(new MouseEvent(type, {
+      clientX,
+      clientY,
+      button: 0,
+      buttons: type === 'mousedown' || type === 'mousemove' ? 1 : 0,
+      bubbles: true,
+      cancelable: true,
+    }));
+  }
+
+  function onTouchStart(e: TouchEvent) {
+    e.preventDefault();
+    if (e.touches.length === 1) {
+      singleTouchActive = true;
+      dispatchMouse('mousedown', e.touches[0].clientX, e.touches[0].clientY);
+    } else if (e.touches.length === 2) {
+      // Second finger landed: abandon any single-finger drag and start pinching
+      if (singleTouchActive) {
+        dispatchMouse('mouseup', e.touches[0].clientX, e.touches[0].clientY);
+        singleTouchActive = false;
+      }
+      const a = e.touches[0], b = e.touches[1];
+      pinchState = {
+        dist: Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY),
+        cx: (a.clientX + b.clientX) / 2,
+        cy: (a.clientY + b.clientY) / 2,
+      };
+    }
+  }
+
+  function onTouchMove(e: TouchEvent) {
+    e.preventDefault();
+    if (pinchState && e.touches.length >= 2) {
+      const a = e.touches[0], b = e.touches[1];
+      const dist = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+      const cx = (a.clientX + b.clientX) / 2;
+      const cy = (a.clientY + b.clientY) / 2;
+      const rect = canvas.getBoundingClientRect();
+      const sx = cx - rect.left, sy = cy - rect.top;
+      // Zoom about the pinch midpoint (same math as onWheel)
+      const newZoom = Math.max(0.1, Math.min(10, zoom * (dist / (pinchState.dist || dist))));
+      const worldX = (sx - width / 2) / zoom + camX;
+      const worldY = (sy - height / 2) / zoom + camY;
+      camX = worldX - (sx - width / 2) / newZoom;
+      camY = worldY - (sy - height / 2) / newZoom;
+      zoom = newZoom;
+      // Two-finger pan: camera follows the midpoint
+      camX -= (cx - pinchState.cx) / newZoom;
+      camY -= (cy - pinchState.cy) / newZoom;
+      pinchState = { dist, cx, cy };
+      markDirty();
+    } else if (singleTouchActive && e.touches.length === 1) {
+      dispatchMouse('mousemove', e.touches[0].clientX, e.touches[0].clientY);
+    }
+  }
+
+  function onTouchEnd(e: TouchEvent) {
+    e.preventDefault();
+    if (pinchState) {
+      // Leaving pinch: ignore the remaining finger until it lifts too
+      if (e.touches.length < 2) pinchState = null;
+      return;
+    }
+    if (singleTouchActive && e.touches.length === 0) {
+      const t = e.changedTouches[0];
+      singleTouchActive = false;
+      dispatchMouse('mouseup', t.clientX, t.clientY);
+      // Synthesize click so document-level click-outside handlers (menus) fire
+      dispatchMouse('click', t.clientX, t.clientY);
+      // Double-tap → dblclick (finish wall chains, rename rooms, …)
+      const now = Date.now();
+      if (now - lastTapTime < 350 && Math.hypot(t.clientX - lastTapX, t.clientY - lastTapY) < 30) {
+        dispatchMouse('dblclick', t.clientX, t.clientY);
+        lastTapTime = 0;
+      } else {
+        lastTapTime = now;
+        lastTapX = t.clientX;
+        lastTapY = t.clientY;
+      }
+    }
+  }
+
   // ── Exact-length wall entry (issue #6) ────────────────────────────
   /** Shared endpoint snapping for wall drawing: magnetic + Shift/angle snap. */
   function snapWallEndPoint(raw: Point): Point {
@@ -3576,7 +3678,7 @@
 <div class="w-full h-full relative overflow-hidden" role="application">
   <canvas
     bind:this={canvas}
-    class="block w-full h-full"
+    class="block w-full h-full touch-none"
     tabindex="0"
     aria-label="Floor plan editor canvas"
     style="cursor: {cursorStyle}"
@@ -3680,7 +3782,7 @@
       bind:this={minimapCanvas}
       width="180"
       height="120"
-      class="absolute bottom-10 right-2 rounded-lg shadow-lg border border-gray-300 cursor-crosshair bg-white"
+      class="absolute bottom-10 right-2 rounded-lg shadow-lg border border-gray-300 cursor-crosshair bg-white max-md:hidden"
       style="z-index: 15;"
       onclick={onMinimapClick}
     ></canvas>
