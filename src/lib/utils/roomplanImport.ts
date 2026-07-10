@@ -644,14 +644,20 @@ export function importRoomPlan(jsonData: any, options: RoomPlanImportOptions = {
   for (const ro of rpObjects) {
     if (!ro.dimensions || ro.dimensions.length < 3 || !ro.transform || ro.transform.length < 16) continue;
     const pos = getPosition(ro.transform);
-    const angle = getYRotation(ro.transform);
+    // Heading in our 2D plane: the object's local X axis projected onto the ground
+    // plane is (t[0], t[2]) — same columns the wall direction uses above. Note that
+    // mapping rpZ→ourY flips handedness, so this equals -getYRotation(): a RoomPlan
+    // Y-rotation of +a appears as plane angle -a in our coords. Our furniture
+    // `rotation` convention is atan2(dy, dx) in data coords (see snapFurnitureToWall
+    // / drawFurnitureItem), so derive it from the transform columns directly.
+    const angle2d = Math.atan2(ro.transform[2], ro.transform[0]);
     const catalogId = mapFurnitureCatalogId(ro.category, ro.dimensions);
 
     furniture.push({
       id: uid(),
       catalogId,
       position: toOurPoint(pos.x, pos.z),
-      rotation: (angle * 180) / Math.PI,
+      rotation: (angle2d * 180) / Math.PI,
       scale: { x: 1, y: 1, z: 1 },
       width: Math.round(ro.dimensions[0] * 100),
       depth: Math.round(ro.dimensions[2] * 100),
