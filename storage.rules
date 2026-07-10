@@ -10,7 +10,10 @@ service firebase.storage {
     // Public read + create (no update/delete) for capture handoff files only.
     match /inbox/{file} {
       allow read: if file.matches('[A-Z2-9]{8}\\.json');
-      allow create: if file.matches('[A-Z2-9]{8}\\.json')
+      // resource == null blocks overwrites: Storage evaluates an overwrite
+      // as a create (new object generation), not an update.
+      allow create: if resource == null
+                    && file.matches('[A-Z2-9]{8}\\.json')
                     && request.resource.size < 10 * 1024 * 1024
                     && request.resource.contentType == 'application/json';
       allow update, delete: if false;
