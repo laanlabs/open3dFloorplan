@@ -69,8 +69,14 @@
       if (!isRoomPlanJson(data)) {
         throw new Error('The downloaded file is not a valid RoomPlan export.');
       }
-      // Same defaults as the RoomPlan import options dialog
-      const project = createProjectFromRoomPlan(data, `Room Capture ${code}`);
+      // Same defaults as the RoomPlan import options dialog — except for
+      // payloads the iOS app marks as already prepared (hand-drawn/edited
+      // plans with exact, possibly intentionally angled geometry), where
+      // straighten/orthogonalize would distort walls and tear corners.
+      const options = data?.openplanPrepared
+        ? { straighten: false, orthogonal: false, mergeDistance: 0 }
+        : undefined;
+      const project = createProjectFromRoomPlan(data, `Room Capture ${code}`, options);
       loadProject(project);
       await localStore.save(project);
       // Remove ?import=CODE so a refresh doesn't re-import
