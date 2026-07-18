@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentProject, viewMode, selectedElementId, selectedRoomId, createDefaultProject, loadProject, selectedTool, placingFurnitureId, elevationPickMode } from '$lib/stores/project';
+  import { currentProject, viewMode, selectedElementId, selectedRoomId, createDefaultProject, loadProject, selectedTool, placingFurnitureId, elevationPickMode, elevationWallId } from '$lib/stores/project';
   import { localStore } from '$lib/services/datastore';
   import { createProjectFromRoomPlan, isRoomPlanJson } from '$lib/utils/roomplanImport';
   import TopBar from '$lib/components/toolbar/TopBar.svelte';
@@ -182,6 +182,10 @@
         {#if mode === '2d'}
           <FloorPlanCanvas />
           <AlignmentToolbar />
+          {#if $elevationWallId}
+            <!-- Integrated elevation view replaces the plan canvas area (sidebars stay) -->
+            <ElevationView />
+          {/if}
         {:else}
           {#if ThreeViewer}
             <ThreeViewer />
@@ -417,7 +421,6 @@
   {/if}
 
   <CommandPalette bind:open={commandPaletteOpen} />
-  <ElevationView />
   <PrintLayout bind:open={printOpen} />
   <OnboardingTooltip />
 {:else}

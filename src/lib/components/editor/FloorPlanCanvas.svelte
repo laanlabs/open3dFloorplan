@@ -1741,6 +1741,8 @@
 
   /** Elevation pick mode: TopBar armed "pick a wall"; next wall click opens its elevation */
   let pickingElevation = $state(false);
+  /** True while the integrated elevation view covers the canvas area */
+  let elevationOpen = $state(false);
 
   onMount(() => {
     ctx = canvas.getContext('2d')!;
@@ -1786,6 +1788,7 @@
     const unsub13 = calibrationPoints.subscribe((pts) => { calPoints = pts; markDirty(); });
     const unsub_multi = selectedElementIds.subscribe((ids) => { currentSelectedIds = ids; markDirty(); });
     const unsub_elevpick = elevationPickMode.subscribe((v) => { pickingElevation = v; markDirty(); });
+    const unsub_elevopen = elevationWallId.subscribe((id) => { elevationOpen = !!id; markDirty(); });
     const unsub14 = activeFloor.subscribe((f) => {
       if (f?.backgroundImage?.dataUrl && (!bgImage || bgImage.src !== f.backgroundImage.dataUrl)) {
         const img = new Image();
@@ -1829,7 +1832,7 @@
     canvas.addEventListener('touchend', onTouchEnd, { passive: false });
     canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
 
-    return () => { resizeObs.disconnect(); unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub9(); unsub10(); unsub11(); unsub12(); unsub13(); unsub_multi(); unsub_elevpick(); unsub14(); unsub_col(); unsub_cols(); unsub_layers(); unsub_snapgrid(); unsubEnt1(); unsubEnt2(); document.removeEventListener('paste', handlePaste); canvas.removeEventListener('touchstart', onTouchStart); canvas.removeEventListener('touchmove', onTouchMove); canvas.removeEventListener('touchend', onTouchEnd); canvas.removeEventListener('touchcancel', onTouchEnd); };
+    return () => { resizeObs.disconnect(); unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub9(); unsub10(); unsub11(); unsub12(); unsub13(); unsub_multi(); unsub_elevpick(); unsub_elevopen(); unsub14(); unsub_col(); unsub_cols(); unsub_layers(); unsub_snapgrid(); unsubEnt1(); unsubEnt2(); document.removeEventListener('paste', handlePaste); canvas.removeEventListener('touchstart', onTouchStart); canvas.removeEventListener('touchmove', onTouchMove); canvas.removeEventListener('touchend', onTouchEnd); canvas.removeEventListener('touchcancel', onTouchEnd); };
   });
 
   /** Compute world bounding box of all elements */
@@ -3882,8 +3885,8 @@
     </div>
   {/if}
 
-  <!-- Contextual Toolbar -->
-  {#if (currentSelectedId || currentSelectedIds.size > 0) && currentFloor && currentTool === 'select'}
+  <!-- Contextual Toolbar (hidden while the integrated elevation view covers the canvas) -->
+  {#if (currentSelectedId || currentSelectedIds.size > 0) && currentFloor && currentTool === 'select' && !elevationOpen}
     {@const el = (() => {
       const f = currentFloor;
       const wall = f.walls.find(w => w.id === currentSelectedId);

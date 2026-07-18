@@ -1,12 +1,18 @@
 <script lang="ts">
   /**
-   * ElevationView — face-on view + editor for a single wall.
+   * ElevationView — integrated face-on view + editor for a single wall.
+   * Fills the canvas area (replaces the plan canvas while active — sidebars stay).
    * Shows the wall as a rectangle (length × height) with its doors and windows,
    * a heavier floor line and a light 0.5 m grid. Openings can be selected and
    * dragged: horizontally to move them along the wall, and windows vertically
-   * to change their sill height. Matches the native iOS elevation feature.
+   * to change their sill height.
+   *
+   * Selection is the app's global selection: clicking a door/window sets
+   * selectedElementId (so the PropertiesPanel shows its properties); clicking
+   * empty wall selects the wall itself. A slim header bar cycles through walls.
+   * Escape (or the TopBar Plan/Elevation toggle) returns to the plan view.
    */
-  import { activeFloor, elevationWallId, updateDoor, updateWindow, beginUndoGroup, endUndoGroup } from '$lib/stores/project';
+  import { activeFloor, elevationWallId, selectedElementId, selectedElementIds, selectedRoomId, updateDoor, updateWindow, beginUndoGroup, endUndoGroup } from '$lib/stores/project';
   import { projectSettings, formatLength } from '$lib/stores/settings';
   import type { Door, Window as Win } from '$lib/models/types';
 
@@ -23,6 +29,13 @@
     if (!id || !f) return null;
     return f.walls.find((w) => w.id === id) ?? null;
   });
+
+  let wallIndex = $derived.by(() => {
+    const f = $activeFloor;
+    if (!wall || !f) return -1;
+    return f.walls.findIndex((w) => w.id === wall!.id);
+  });
+  let wallCount = $derived($activeFloor?.walls.length ?? 0);
 
   let doors = $derived.by(() => {
     const f = $activeFloor;
@@ -56,35 +69,71 @@
 
   let wallH = $derived(wall ? (wall.height || DEFAULT_WALL_HEIGHT) : DEFAULT_WALL_HEIGHT);
 
-  let selectedOpeningId = $state<string | null>(null);
+  /** Global selection, narrowed to an opening on this wall (drives highlight + dims) */
+  let selectedOpeningId = $derived.by(() => {
+    const id = $selectedElementId;
+    if (!id) return null;
+    return doors.some((d) => d.id === id) || windows.some((w) => w.id === id) ? id : null;
+  });
+
   let hoverOpeningId = $state<string | null>(null);
   let dragging = $state(false);
 
-  // Reset local selection whenever a different wall is opened
-  $effect(() => {
-    $elevationWallId;
-    selectedOpeningId = null;
+  function selectElement(id: string | null) {
+    selectedElementId.set(id);
+    selectedElementIds.set(new Set());
+    selectedRoomId.set(null);
+  }
+
+  /** Show a different wall (cycling or fallback) and select it */
+  function showWall(id: string) {
     hoverOpeningId = null;
-  });
+    elevationWallId.set(id);
+    selectElement(id);
+  }
 
-  // Auto-close if the wall disappears (e.g. deleted via undo while open)
+  function cycleWall(dir: 1 | -1) {
+    const f = $activeFloor;
+    if (!f || f.walls.length === 0) return;
+    const i = f.walls.findIndex((w) => w.id === $elevationWallId);
+    const next = f.walls[(((i < 0 ? 0 : i) + dir) % f.walls.length + f.walls.length) % f.walls.length];
+    showWall(next.id);
+  }
+
+  // Track the shown wall's index so we can advance gracefully if it is deleted
+  let lastWallIndex = 0;
   $effect(() => {
-    if ($elevationWallId && $activeFloor && !wall) elevationWallId.set(null);
+    if (wallIndex >= 0) lastWallIndex = wallIndex;
   });
 
-  function close() {
+  // If the shown wall disappears (deleted / undone): advance to the nearest
+  // remaining wall, or drop back to the plan view when none are left.
+  $effect(() => {
+    const id = $elevationWallId;
+    const f = $activeFloor;
+    if (!id || !f) return;
+    if (!f.walls.some((w) => w.id === id)) {
+      if (f.walls.length > 0) {
+        showWall(f.walls[Math.max(0, Math.min(lastWallIndex, f.walls.length - 1))].id);
+      } else {
+        elevationWallId.set(null);
+      }
+    }
+  });
+
+  function backToPlan() {
     elevationWallId.set(null);
   }
 
-  // Close on Escape. Registered in the capture phase so the 2D canvas's own
-  // window-level Escape handling (deselect / cancel) doesn't also fire.
+  // Escape returns to the plan view. Registered in the capture phase so the
+  // plan canvas's own window-level Escape handling doesn't also fire.
   $effect(() => {
     if (!$elevationWallId) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopImmediatePropagation();
-        close();
+        backToPlan();
       }
     };
     window.addEventListener('keydown', onKey, true);
@@ -179,7 +228,8 @@
     if (!p) return;
     const hit = hitOpening(p.x, p.y);
     if (hit) {
-      selectedOpeningId = hit.id;
+      // Global selection: the PropertiesPanel now shows this opening
+      selectElement(hit.id);
       const door = hit.kind === 'door' ? doors.find((d) => d.id === hit.id) : undefined;
       const win = hit.kind === 'window' ? windows.find((w) => w.id === hit.id) : undefined;
       drag = {
@@ -196,7 +246,8 @@
       dragging = true;
       canvas?.setPointerCapture(e.pointerId);
     } else {
-      selectedOpeningId = null;
+      // Empty wall area — selection falls back to the wall itself
+      selectElement(wall.id);
     }
   }
 
@@ -406,57 +457,42 @@
 </script>
 
 {#if wall}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="fixed inset-0 bg-black/50 flex items-center justify-center z-[70]"
-    onclick={close}
-    onkeydown={(e) => { if (e.key === 'Escape') close(); }}
-    role="dialog"
-    tabindex="-1"
-    aria-label="Wall elevation"
-  >
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div
-      class="bg-white rounded-2xl shadow-2xl w-[min(96vw,64rem)] h-[min(88vh,44rem)] flex flex-col overflow-hidden"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
-      role="document"
-    >
-      <!-- Header -->
-      <div class="flex items-center justify-between px-5 py-3 border-b border-gray-100 shrink-0">
-        <div class="flex items-center gap-2">
-          <span class="w-6 h-6 bg-gray-200 rounded flex items-center justify-center text-xs">▤</span>
-          <h2 class="text-sm font-semibold text-slate-800">
-            Wall Elevation
-            <span class="font-normal text-gray-400 ml-1">{formatLength(wallLen, units)} × {formatLength(wallH, units)}</span>
-          </h2>
-        </div>
-        <button
-          class="text-gray-400 hover:text-gray-600 text-xl leading-none px-1"
-          onclick={close}
-          aria-label="Close elevation view"
-        >✕</button>
-      </div>
+  <!-- Integrated view: fills the canvas area over the plan canvas; right padding
+       leaves room for the fixed PropertiesPanel (w-64) that stays visible on md+ -->
+  <div class="absolute inset-0 z-30 bg-white flex flex-col md:pr-64">
+    <!-- Slim header: wall index, cycling, dimensions -->
+    <div class="flex items-center gap-2 px-3 h-10 border-b border-gray-200 bg-slate-50 shrink-0">
+      <button
+        class="w-7 h-7 flex items-center justify-center rounded-md text-slate-500 hover:text-slate-800 hover:bg-slate-200 transition-colors disabled:opacity-30 disabled:pointer-events-none text-lg leading-none"
+        onclick={() => cycleWall(-1)}
+        disabled={wallCount < 2}
+        title="Previous wall"
+        aria-label="Previous wall"
+      >‹</button>
+      <span class="text-sm font-semibold text-slate-700 tabular-nums">Wall {wallIndex + 1} of {wallCount}</span>
+      <button
+        class="w-7 h-7 flex items-center justify-center rounded-md text-slate-500 hover:text-slate-800 hover:bg-slate-200 transition-colors disabled:opacity-30 disabled:pointer-events-none text-lg leading-none"
+        onclick={() => cycleWall(1)}
+        disabled={wallCount < 2}
+        title="Next wall"
+        aria-label="Next wall"
+      >›</button>
+      <span class="text-xs text-gray-400 ml-1">{formatLength(wallLen, units)} × {formatLength(wallH, units)}</span>
+      <div class="flex-1"></div>
+      <span class="text-[11px] text-gray-400 max-lg:hidden">Drag openings to move · drag windows up/down for sill · Esc for plan</span>
+    </div>
 
-      <!-- Canvas -->
-      <div class="flex-1 min-h-0 relative" bind:clientWidth={cw} bind:clientHeight={ch}>
-        <canvas
-          bind:this={canvas}
-          class="absolute inset-0 w-full h-full touch-none select-none"
-          style="cursor: {cursor}"
-          onpointerdown={onPointerDown}
-          onpointermove={onPointerMove}
-          onpointerup={endDrag}
-          onpointercancel={endDrag}
-        ></canvas>
-      </div>
-
-      <!-- Footer hint -->
-      <div class="px-5 py-2 border-t border-gray-100 shrink-0">
-        <p class="text-xs text-gray-400 text-center">
-          Click a door or window to select it · drag to move it along the wall · drag windows up/down to change sill height · Esc to close
-        </p>
-      </div>
+    <!-- Elevation canvas -->
+    <div class="flex-1 min-h-0 relative" bind:clientWidth={cw} bind:clientHeight={ch}>
+      <canvas
+        bind:this={canvas}
+        class="absolute inset-0 w-full h-full touch-none select-none"
+        style="cursor: {cursor}"
+        onpointerdown={onPointerDown}
+        onpointermove={onPointerMove}
+        onpointerup={endDrag}
+        onpointercancel={endDrag}
+      ></canvas>
     </div>
   </div>
 {/if}

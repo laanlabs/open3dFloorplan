@@ -44,17 +44,46 @@
     viewMode.set(m);
   }
 
-  /** Elevation entry point: open directly if a wall is selected, otherwise
-   *  enter pick mode (next wall clicked in the 2D canvas opens its elevation).
-   *  In 3D this switches back to 2D first. */
+  /** Switch the 2D canvas area to the integrated elevation view:
+   *  shows the selected wall, or defaults to the floor's first wall.
+   *  In 3D this switches back to 2D first. No-op if the floor has no walls. */
+  function enterElevation() {
+    if (mode === '3d') viewMode.set('2d');
+    elevationPickMode.set(false);
+    const floor = get(activeFloor);
+    if (!floor || floor.walls.length === 0) return;
+    const selId = get(selectedElementId);
+    const wall = (selId && floor.walls.find((w) => w.id === selId)) || floor.walls[0];
+    selectedElementId.set(wall.id);
+    elevationWallId.set(wall.id);
+    moreOpen = false;
+  }
+
+  /** Return the 2D canvas area to the plan view */
+  function exitElevation() {
+    elevationWallId.set(null);
+    elevationPickMode.set(false);
+    moreOpen = false;
+  }
+
+  /** Mobile overflow item: toggle between plan and elevation */
+  function toggleElevationView() {
+    if (get(elevationWallId)) exitElevation();
+    else enterElevation();
+  }
+
+  /** Pick-a-wall entry point: open directly if a wall is selected, otherwise
+   *  arm pick mode — the next wall clicked in the plan canvas opens its
+   *  elevation. Returns to the plan view first so the canvas is clickable. */
   function onElevationButton() {
     const selId = get(selectedElementId);
     const floor = get(activeFloor);
+    if (mode === '3d') viewMode.set('2d');
     if (selId && floor?.walls.some((w) => w.id === selId)) {
       elevationPickMode.set(false);
       elevationWallId.set(selId);
     } else {
-      if (mode === '3d') viewMode.set('2d');
+      elevationWallId.set(null); // picking happens on the plan canvas
       elevationPickMode.update((v) => !v); // pressing again cancels pick mode
     }
     moreOpen = false;
@@ -383,8 +412,24 @@
     >3D</button>
   </div>
 
-  <!-- Zoom controls (2D only; mobile uses pinch + overflow menu) -->
+  <!-- Plan / Elevation sub-toggle (2D only; mobile uses the overflow menu) -->
   {#if mode === '2d'}
+    <div class="flex bg-white/15 rounded-full p-0.5 max-md:hidden">
+      <button
+        onclick={exitElevation}
+        class="px-2.5 py-1 text-xs font-semibold rounded-full transition-colors {!$elevationWallId ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+        title="Plan view (top-down)"
+      >Plan</button>
+      <button
+        onclick={enterElevation}
+        class="px-2.5 py-1 text-xs font-semibold rounded-full transition-colors {$elevationWallId ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+        title="Elevation view — shows the selected wall face-on (or the first wall)"
+      >Elevation</button>
+    </div>
+  {/if}
+
+  <!-- Zoom controls (2D plan only; mobile uses pinch + overflow menu) -->
+  {#if mode === '2d' && !$elevationWallId}
     <div class="flex items-center gap-1 bg-white/15 rounded-full p-0.5 max-md:hidden">
       <button
         onclick={() => canvasZoom.update(z => Math.max(0.1, z / 1.25))}
@@ -468,7 +513,7 @@
           <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => layerVisibility.update(v => ({ ...v, furniture: !v.furniture }))}>{$showFurnitureStore ? '✓ ' : ''}Show Furniture</button>
           <div class="h-px bg-gray-100 my-1"></div>
         {/if}
-        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={onElevationButton}>{$elevationPickMode ? '✓ ' : ''}Wall Elevation</button>
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={toggleElevationView}>{$elevationWallId ? '✓ ' : ''}Elevation View</button>
         <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { versionHistoryOpen = true; moreOpen = false; }}>Version History</button>
         <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { areaOpen = true; moreOpen = false; }}>Area Summary</button>
         <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { settingsOpen = true; moreOpen = false; }}>Settings</button>
