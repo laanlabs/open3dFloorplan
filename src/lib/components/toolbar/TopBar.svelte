@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
-  import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject } from '$lib/stores/project';
+  import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject, activeFloor, selectedElementId, elevationWallId, elevationPickMode } from '$lib/stores/project';
   import { localStore } from '$lib/services/datastore';
   import { get } from 'svelte/store';
   import type { Floor, Project } from '$lib/models/types';
@@ -42,6 +42,22 @@
 
   function setMode(m: '2d' | '3d') {
     viewMode.set(m);
+  }
+
+  /** Elevation entry point: open directly if a wall is selected, otherwise
+   *  enter pick mode (next wall clicked in the 2D canvas opens its elevation).
+   *  In 3D this switches back to 2D first. */
+  function onElevationButton() {
+    const selId = get(selectedElementId);
+    const floor = get(activeFloor);
+    if (selId && floor?.walls.some((w) => w.id === selId)) {
+      elevationPickMode.set(false);
+      elevationWallId.set(selId);
+    } else {
+      if (mode === '3d') viewMode.set('2d');
+      elevationPickMode.update((v) => !v); // pressing again cancels pick mode
+    }
+    moreOpen = false;
   }
 
   function onNameBlur() {
@@ -342,6 +358,17 @@
     </svg>
   </button>
 
+  <!-- Wall elevation (opens selected wall face-on, or pick mode) -->
+  <button
+    onclick={onElevationButton}
+    class="p-1.5 rounded transition-colors max-md:hidden {$elevationPickMode ? 'text-white bg-white/20' : 'text-white/80 hover:text-white hover:bg-white/10'}"
+    title="Wall Elevation — opens the selected wall face-on, or click a wall to pick one"
+    aria-label="Wall Elevation"
+    aria-pressed={$elevationPickMode}
+  >
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="1"/><line x1="3" y1="18" x2="21" y2="18"/><rect x="7" y="9" width="4" height="4"/><rect x="14" y="10" width="3" height="8"/></svg>
+  </button>
+
   <div class="h-5 w-px bg-white/20 max-md:hidden"></div>
 
   <!-- 2D/3D pill toggle -->
@@ -441,6 +468,7 @@
           <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => layerVisibility.update(v => ({ ...v, furniture: !v.furniture }))}>{$showFurnitureStore ? '✓ ' : ''}Show Furniture</button>
           <div class="h-px bg-gray-100 my-1"></div>
         {/if}
+        <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={onElevationButton}>{$elevationPickMode ? '✓ ' : ''}Wall Elevation</button>
         <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { versionHistoryOpen = true; moreOpen = false; }}>Version History</button>
         <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { areaOpen = true; moreOpen = false; }}>Area Summary</button>
         <button class="w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left" onclick={() => { settingsOpen = true; moreOpen = false; }}>Settings</button>
