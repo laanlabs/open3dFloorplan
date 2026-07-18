@@ -929,6 +929,9 @@ export function findGroupForElement(floor: Floor, elementId: string): ElementGro
   return floor.groups.find(g => g.elementIds.includes(elementId));
 }
 
+/** Wall id whose face-on elevation editor is open (null = closed) */
+export const elevationWallId = writable<string | null>(null);
+
 // Zoom store for 2D canvas — shared between FloorPlanCanvas and TopBar
 export const canvasZoom = writable<number>(1);
 // Camera position stores for 2D canvas — used to compute viewport center

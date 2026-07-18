@@ -13,6 +13,7 @@
   import AlignmentToolbar from '$lib/components/editor/AlignmentToolbar.svelte';
   import UndoHistoryPanel from '$lib/components/editor/UndoHistoryPanel.svelte';
   import CommandPalette from '$lib/components/editor/CommandPalette.svelte';
+  import ElevationView from '$lib/components/editor/ElevationView.svelte';
   import PrintLayout from '$lib/components/editor/PrintLayout.svelte';
   import OnboardingTooltip from '$lib/components/OnboardingTooltip.svelte';
   import { triggerTip } from '$lib/stores/onboarding.svelte';
@@ -415,6 +416,7 @@
   {/if}
 
   <CommandPalette bind:open={commandPaletteOpen} />
+  <ElevationView />
   <PrintLayout bind:open={printOpen} />
   <OnboardingTooltip />
 {:else}

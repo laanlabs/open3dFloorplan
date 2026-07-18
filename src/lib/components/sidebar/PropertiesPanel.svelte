@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeFloor, selectedElementId, selectedRoomId, updateWall, updateDoor, updateWindow, updateRoom, updateFurniture, detectedRoomsStore, updateStair, updateColumn, updateBackgroundImage, setBackgroundImage, calibrationMode, calibrationPoints, updateTextAnnotation, toggleFurnitureLock, updateEntourageItem, removeElement } from '$lib/stores/project';
+  import { activeFloor, selectedElementId, selectedRoomId, updateWall, updateDoor, updateWindow, updateRoom, updateFurniture, detectedRoomsStore, updateStair, updateColumn, updateBackgroundImage, setBackgroundImage, calibrationMode, calibrationPoints, updateTextAnnotation, toggleFurnitureLock, updateEntourageItem, removeElement, elevationWallId } from '$lib/stores/project';
   import { getEntourageDef } from '$lib/utils/entourageCatalog';
   import { floorMaterials, wallColors } from '$lib/utils/materials';
   import { getCatalogItem } from '$lib/utils/furnitureCatalog';
@@ -340,6 +340,14 @@
         <span class="text-xs text-gray-500">Height ({unitLabel()})</span>
         <input type="number" value={displayValue(selectedWall.height)} oninput={onWallHeight} class="w-full px-2 py-1 border border-gray-200 rounded text-sm" />
       </label>
+      <button
+        class="w-full py-1.5 text-sm rounded-md bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors flex items-center justify-center gap-1.5"
+        onclick={() => { if (selectedWall) elevationWallId.set(selectedWall.id); }}
+        title="View this wall face-on and edit its doors and windows"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="1"/><line x1="3" y1="18" x2="21" y2="18"/><rect x="7" y="9" width="4" height="4"/><rect x="14" y="10" width="3" height="8"/></svg>
+        Elevation
+      </button>
       <div class="flex items-center gap-2">
         <span class="text-xs text-gray-500">Curved</span>
         <button
