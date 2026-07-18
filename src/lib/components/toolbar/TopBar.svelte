@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
-  import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject, activeFloor, selectedElementId, elevationWallId, elevationPickMode } from '$lib/stores/project';
+  import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject, activeFloor, selectedElementId, elevationWallId } from '$lib/stores/project';
   import { localStore } from '$lib/services/datastore';
   import { get } from 'svelte/store';
   import type { Floor, Project } from '$lib/models/types';
@@ -49,7 +49,6 @@
    *  In 3D this switches back to 2D first. No-op if the floor has no walls. */
   function enterElevation() {
     if (mode === '3d') viewMode.set('2d');
-    elevationPickMode.set(false);
     const floor = get(activeFloor);
     if (!floor || floor.walls.length === 0) return;
     const selId = get(selectedElementId);
@@ -62,7 +61,6 @@
   /** Return the 2D canvas area to the plan view */
   function exitElevation() {
     elevationWallId.set(null);
-    elevationPickMode.set(false);
     moreOpen = false;
   }
 
@@ -70,23 +68,6 @@
   function toggleElevationView() {
     if (get(elevationWallId)) exitElevation();
     else enterElevation();
-  }
-
-  /** Pick-a-wall entry point: open directly if a wall is selected, otherwise
-   *  arm pick mode — the next wall clicked in the plan canvas opens its
-   *  elevation. Returns to the plan view first so the canvas is clickable. */
-  function onElevationButton() {
-    const selId = get(selectedElementId);
-    const floor = get(activeFloor);
-    if (mode === '3d') viewMode.set('2d');
-    if (selId && floor?.walls.some((w) => w.id === selId)) {
-      elevationPickMode.set(false);
-      elevationWallId.set(selId);
-    } else {
-      elevationWallId.set(null); // picking happens on the plan canvas
-      elevationPickMode.update((v) => !v); // pressing again cancels pick mode
-    }
-    moreOpen = false;
   }
 
   function onNameBlur() {
@@ -387,18 +368,32 @@
     </svg>
   </button>
 
-  <!-- Wall elevation (opens selected wall face-on, or pick mode) -->
-  <button
-    onclick={onElevationButton}
-    class="p-1.5 rounded transition-colors max-md:hidden {$elevationPickMode ? 'text-white bg-white/20' : 'text-white/80 hover:text-white hover:bg-white/10'}"
-    title="Wall Elevation — opens the selected wall face-on, or click a wall to pick one"
-    aria-label="Wall Elevation"
-    aria-pressed={$elevationPickMode}
-  >
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="1"/><line x1="3" y1="18" x2="21" y2="18"/><rect x="7" y="9" width="4" height="4"/><rect x="14" y="10" width="3" height="8"/></svg>
-  </button>
-
   <div class="h-5 w-px bg-white/20 max-md:hidden"></div>
+
+  <!-- Plan / Elevation sub-toggle (2D only) — sits left of the 2D/3D pill so the
+       two switches read as a family; mobile (<md) uses the overflow menu instead -->
+  {#if mode === '2d'}
+    <div class="flex bg-white/15 rounded-full p-0.5 max-md:hidden">
+      <button
+        onclick={exitElevation}
+        class="px-3 py-1 text-xs font-semibold rounded-full transition-colors flex items-center gap-1.5 {!$elevationWallId ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+        title="Plan view — top-down floor plan"
+        aria-pressed={!$elevationWallId}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="1"/><path d="M3 12h8"/><path d="M11 12v9"/><path d="M15 3v6"/></svg>
+        <span>Plan</span>
+      </button>
+      <button
+        onclick={enterElevation}
+        class="px-3 py-1 text-xs font-semibold rounded-full transition-colors flex items-center gap-1.5 {$elevationWallId ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
+        title="Elevation view — the selected wall face-on (or the first wall)"
+        aria-pressed={!!$elevationWallId}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9H3z"/><rect x="10" y="14" width="4" height="6"/><rect x="5.5" y="13" width="3" height="3"/></svg>
+        <span>Elevation</span>
+      </button>
+    </div>
+  {/if}
 
   <!-- 2D/3D pill toggle -->
   <div class="flex bg-white/15 rounded-full p-0.5">
@@ -411,22 +406,6 @@
       class="px-3 max-md:px-2 py-1 text-xs font-semibold rounded-full transition-colors {mode === '3d' ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
     >3D</button>
   </div>
-
-  <!-- Plan / Elevation sub-toggle (2D only; mobile uses the overflow menu) -->
-  {#if mode === '2d'}
-    <div class="flex bg-white/15 rounded-full p-0.5 max-md:hidden">
-      <button
-        onclick={exitElevation}
-        class="px-2.5 py-1 text-xs font-semibold rounded-full transition-colors {!$elevationWallId ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
-        title="Plan view (top-down)"
-      >Plan</button>
-      <button
-        onclick={enterElevation}
-        class="px-2.5 py-1 text-xs font-semibold rounded-full transition-colors {$elevationWallId ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
-        title="Elevation view — shows the selected wall face-on (or the first wall)"
-      >Elevation</button>
-    </div>
-  {/if}
 
   <!-- Zoom controls (2D plan only; mobile uses pinch + overflow menu) -->
   {#if mode === '2d' && !$elevationWallId}
