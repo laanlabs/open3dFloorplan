@@ -931,6 +931,9 @@ export function findGroupForElement(floor: Floor, elementId: string): ElementGro
 
 /** Wall id whose face-on elevation editor is open (null = closed) */
 export const elevationWallId = writable<string | null>(null);
+/** Armed when Elevation is requested with no wall selected: the next wall
+ *  clicked in the plan canvas opens its elevation; empty click / Esc cancels */
+export const elevationPickMode = writable<boolean>(false);
 
 // Zoom store for 2D canvas — shared between FloorPlanCanvas and TopBar
 export const canvasZoom = writable<number>(1);

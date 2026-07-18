@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
-  import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject, activeFloor, selectedElementId, elevationWallId } from '$lib/stores/project';
+  import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject, activeFloor, selectedElementId, elevationWallId, elevationPickMode } from '$lib/stores/project';
   import { localStore } from '$lib/services/datastore';
   import { get } from 'svelte/store';
   import type { Floor, Project } from '$lib/models/types';
@@ -44,23 +44,30 @@
     viewMode.set(m);
   }
 
-  /** Switch the 2D canvas area to the integrated elevation view:
-   *  shows the selected wall, or defaults to the floor's first wall.
-   *  In 3D this switches back to 2D first. No-op if the floor has no walls. */
+  /** Switch the 2D canvas area to the integrated elevation view.
+   *  With a wall selected it opens that wall; otherwise it stays in Plan and
+   *  arms pick mode — the next wall clicked in the canvas opens its elevation.
+   *  In 3D this switches back to 2D first. */
   function enterElevation() {
     if (mode === '3d') viewMode.set('2d');
     const floor = get(activeFloor);
-    if (!floor || floor.walls.length === 0) return;
     const selId = get(selectedElementId);
-    const wall = (selId && floor.walls.find((w) => w.id === selId)) || floor.walls[0];
-    selectedElementId.set(wall.id);
-    elevationWallId.set(wall.id);
+    const wall = selId ? floor?.walls.find((w) => w.id === selId) : undefined;
+    if (wall) {
+      elevationPickMode.set(false);
+      selectedElementId.set(wall.id);
+      elevationWallId.set(wall.id);
+    } else {
+      // No wall selected — prompt the user to pick one on the plan canvas
+      elevationPickMode.update((v) => !v); // pressing again cancels
+    }
     moreOpen = false;
   }
 
   /** Return the 2D canvas area to the plan view */
   function exitElevation() {
     elevationWallId.set(null);
+    elevationPickMode.set(false);
     moreOpen = false;
   }
 
@@ -385,9 +392,9 @@
       </button>
       <button
         onclick={enterElevation}
-        class="px-3 py-1 text-xs font-semibold rounded-full transition-colors flex items-center gap-1.5 {$elevationWallId ? 'bg-white text-slate-800' : 'text-white/80 hover:text-white'}"
-        title="Elevation view — the selected wall face-on (or the first wall)"
-        aria-pressed={!!$elevationWallId}
+        class="px-3 py-1 text-xs font-semibold rounded-full transition-colors flex items-center gap-1.5 {$elevationWallId ? 'bg-white text-slate-800' : $elevationPickMode ? 'bg-blue-500 text-white' : 'text-white/80 hover:text-white'}"
+        title={$elevationPickMode ? 'Pick a wall in the plan to view its elevation — press again or Esc to cancel' : 'Elevation view — the selected wall face-on, or pick one on the plan'}
+        aria-pressed={!!$elevationWallId || $elevationPickMode}
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9H3z"/><rect x="10" y="14" width="4" height="6"/><rect x="5.5" y="13" width="3" height="3"/></svg>
         <span>Elevation</span>

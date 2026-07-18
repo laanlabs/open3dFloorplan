@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentProject, viewMode, selectedElementId, selectedRoomId, createDefaultProject, loadProject, selectedTool, placingFurnitureId, elevationWallId } from '$lib/stores/project';
+  import { currentProject, viewMode, selectedElementId, selectedRoomId, createDefaultProject, loadProject, selectedTool, placingFurnitureId, elevationWallId, elevationPickMode } from '$lib/stores/project';
   import { localStore } from '$lib/services/datastore';
   import { createProjectFromRoomPlan, isRoomPlanJson } from '$lib/utils/roomplanImport';
   import TopBar from '$lib/components/toolbar/TopBar.svelte';
@@ -103,6 +103,7 @@
       // Clear selection when entering 3D — start in view-only mode
       selectedElementId.set(null);
       selectedRoomId.set(null);
+      elevationPickMode.set(false);
       // Onboarding tip for first 3D view
       triggerTip('first-3d', 200, 80);
     }
